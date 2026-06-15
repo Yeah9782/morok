@@ -366,6 +366,65 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   per-function pipeline, so VM bytecode exists and generated `morok.*` helpers
   remain outside later function-local transforms.
 
+## Self-checksum-fused constants — IR structure
+- True code-region checksums need post-link byte ranges.  The IR pass emits the
+  runtime/data-flow contract over private `morok.sc.region.*` byte regions and
+  `morok.sc.expected.*` hash globals; a post-link rewriter can replace those
+  regions and expected hashes with final native code slices.
+- Each selected integer constant is reconstructed as
+  `encoded ^ volatile_mask ^ (runtime_hash(region) ^ expected_hash)`.  When the
+  region matches the expected hash, the diff is zero and the original constant
+  appears.  If bytes change without updating the expected hash, the diff flows
+  into the program value and silently corrupts output.
+- The pass deliberately emits no trap and no check branch.  The integrity value
+  is data, so there is no separable success/failure edge to patch out.
+- Runtime hash helpers are internal `morok.sc.diff.*` functions with volatile
+  region and expected loads, `noinline`, and `optnone`.  Per-constant masks live
+  in private mutable `morok.sc.mask.*` globals and are volatile-loaded at each
+  use site.
+- Scheduler placement is after trace keying/dispatcherless routing and before
+  constant encryption, so the integrity fusion is late while ordinary constant
+  encryption can still hide the encoded constants introduced by this pass.
+
+## Data-flow-entangled integrity — IR structure
+- The pass generalizes checksum-fused constants from scalars to live lookup
+  tables.  Selected `i8 a OP b` operations are replaced by volatile loads from
+  private `morok.dfi.table.*` globals.
+- Table entries are encoded with a stream key derived from the expected hash of
+  a private `morok.dfi.region.*` byte region.  The runtime helper
+  `morok.dfi.hash.*` hashes that region with volatile loads, volatile-loads
+  `morok.dfi.expected.*`, and returns `actual_hash ^ expected_hash`.
+- Each lookup derives its decode seed as `expected_hash_const ^ runtime_diff`.
+  On the valid region the diff is zero and the loaded table byte decodes to the
+  original operation result.  Region or expected-hash tampering changes the key
+  and corrupts the value in data flow.
+- The table stays encoded at rest; unlike generic TableArithmetic, there is no
+  lazy plaintext materialization pass.  There is also no trap or integrity
+  branch, only data poisoning.
+- Scheduler placement is before generic TableArithmetic, so this pass claims a
+  configurable subset of byte operations for integrity-bound tables and leaves
+  the remaining byte ops to ordinary encrypted table lowering.
+
+## Mutual guard graph — IR structure
+- True overlapping code-byte checkers need post-link ranges.  The IR pass emits
+  the final contract over private `morok.mg.region.*` byte regions and mutable
+  `morok.mg.expected.*` hash globals; a post-link rewriter can replace both
+  with native ranges and final expected hashes after layout is fixed.
+- Each selected function receives several internal `morok.mg.node.*` helpers.
+  A node hashes its own region with volatile byte loads, volatile-loads its own
+  expected hash, and also volatile-loads two neighboring nodes' expected hashes.
+  The node returns a mixed diff that is zero only when its own region and peer
+  expected globals match the baked graph constants.
+- The internal `morok.mg.diff.*` aggregator calls every node and xors/mixes the
+  node diffs.  Valid graphs contribute zero.  Tampering with one region or
+  expected hash makes that node and its neighbors contribute nonzero data.
+- Selected integer returns are rewritten as `ret_value ^ graph_diff` (truncated
+  to the return width as needed).  There is no trap and no check branch; the
+  integrity graph affects program data directly.
+- Scheduler placement is after self-checksum constants and before constant
+  encryption, so it sees late control/data shape while ordinary literal
+  encryption can still obscure constants introduced in the user function.
+
 ## Vector obfuscation — IR structure
 - Eligible scalar integer binary ops are lifted to `<N x iM>` operations, where
   `N = width / M` for configured widths 128, 256, or 512 bits.  Lane `realLane`
@@ -445,14 +504,17 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 - PhiTangling: redundant edge-copy/direct PHI webs; zero cross-terms rewrite uses.
 - AliasOpaquePredicates: maintained pointer/alias memory invariant guards with decoy edges.
 - CoherentDecoys: opaque-dead alternate return computations, not junk blocks.
+- DataFlowIntegrity: byte-op tables decoded by runtime integrity hashes.
 - OptimizerAmplification: early branchless select lattice over equivalent forms.
 - SubThresholdPersistence: volatile local-seed opaque-zero terms under a small cap.
 - TableArithmetic: encrypted lazy byte-op lookup tables.
 - UniformPrimitiveLowering: byte-op tables plus memory-loaded indirectbr dispatch.
 - Virtualization: encrypted per-function bytecode plus threaded computed-goto VM helpers.
 - HashGatedSelfDecrypt: VM bytecode globals get a hash-gated lazy outer decryptor.
+- MutualGuardGraph: overlapping checksum nodes whose combined diff poisons returns.
 - PathExplosion: opaque-guarded input-derived loops with volatile symbolic stores and indirectbr dispatch.
 - TraceKeying: edge-carried rolling trace accumulator with guards and neutral poisoning.
+- SelfChecksumConstants: constants XORed with runtime checksum diffs for data-only tamper corruption.
 - VectorObfuscation: scalar→SIMD lifting; width 128/256/512, shuffle, lift_comparisons.
 - FunctionWrapper: polymorphic proxies; prob/times.
 - FunctionCallObfuscate: dlopen/dlsym indirection; uses a JSON symbol DB (`json.hpp`).
@@ -460,5 +522,5 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 
 ## Scheduler order (to preserve semantics)
 AntiHook → AntiClassDump → FCO(fn) → AntiDebug → StringEnc → Virtualization → HashSelfDecrypt → per-fn{ Split, BCF, OptAmp, Sub,
-MBA, AliasOp, CoherentDecoys, NiState/EntFla/CSM/Flatten, StateOp, IFSM, PhiTangle, TypePun, StackCoalesce, PointerLaunder, TableArith, Uniform, Vec, PathExplosion, TraceKeying, Dispatcherless } → ConstEnc → IndirectBranch → FunctionWrapper →
+MBA, AliasOp, CoherentDecoys, NiState/EntFla/CSM/Flatten, StateOp, IFSM, PhiTangle, TypePun, StackCoalesce, PointerLaunder, DataFlowIntegrity, TableArith, Uniform, Vec, PathExplosion, TraceKeying, Dispatcherless, SelfChecksum, MutualGuardGraph } → ConstEnc → IndirectBranch → FunctionWrapper →
 FeatureElimination (strip debug/names) → cleanup marker decls.

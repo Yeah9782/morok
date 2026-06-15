@@ -18,6 +18,7 @@
 #include "morok/passes/CoherentDecoys.hpp"
 #include "morok/passes/ConstantEncryption.hpp"
 #include "morok/passes/DataEntangledFlattening.hpp"
+#include "morok/passes/DataFlowIntegrity.hpp"
 #include "morok/passes/DispatcherlessRouting.hpp"
 #include "morok/passes/Flattening.hpp"
 #include "morok/passes/FunctionCallObfuscate.hpp"
@@ -26,11 +27,13 @@
 #include "morok/passes/IndirectBranch.hpp"
 #include "morok/passes/InterproceduralFsm.hpp"
 #include "morok/passes/Mba.hpp"
+#include "morok/passes/MutualGuardGraph.hpp"
 #include "morok/passes/NonInvertibleState.hpp"
 #include "morok/passes/OptimizerAmplification.hpp"
 #include "morok/passes/PathExplosion.hpp"
 #include "morok/passes/PhiTangling.hpp"
 #include "morok/passes/PointerLaundering.hpp"
+#include "morok/passes/SelfChecksumConstants.hpp"
 #include "morok/passes/SplitBasicBlocks.hpp"
 #include "morok/passes/StackCoalescing.hpp"
 #include "morok/passes/StateOpaquePredicates.hpp"
@@ -292,6 +295,20 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
             changed |= passes::pointerLaunderFunction(F, p, rng);
         }
 
+        // Integrity-bound byte tables consume selected byte ops before the
+        // generic arithmetic table pass handles the remaining ones.
+        if (ir::shouldObfuscate(
+                F, "dfi", eff.data_flow_integrity.enabled.value_or(false))) {
+            passes::DataFlowIntegrityParams p;
+            p.probability =
+                eff.data_flow_integrity.probability.value_or(35);
+            p.max_tables =
+                eff.data_flow_integrity.max_tables.value_or(2);
+            p.region_bytes =
+                eff.data_flow_integrity.region_bytes.value_or(32);
+            changed |= passes::dataFlowIntegrityFunction(F, p, rng);
+        }
+
         // Replace surviving byte arithmetic with encrypted lazy lookup tables.
         if (ir::shouldObfuscate(F, "tablearith",
                                 eff.table_arith.enabled.value_or(false))) {
@@ -356,6 +373,29 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
             p.max_routes = eff.dispatcherless.max_routes.value_or(32);
             p.max_terms = eff.dispatcherless.max_terms.value_or(4);
             changed |= passes::dispatcherlessRoutingFunction(F, p, rng);
+        }
+
+        // Feed a runtime checksum diff into constants as data, not a branch.
+        if (ir::shouldObfuscate(F, "selfcheck",
+                                eff.self_checksum.enabled.value_or(false))) {
+            passes::SelfChecksumParams p;
+            p.probability = eff.self_checksum.probability.value_or(35);
+            p.max_constants = eff.self_checksum.max_constants.value_or(8);
+            p.region_bytes = eff.self_checksum.region_bytes.value_or(32);
+            changed |= passes::selfChecksumConstantsFunction(F, p, rng);
+        }
+
+        // Overlap several checksum nodes and poison selected return values
+        // with the aggregate graph diff.  Constant encryption can still hide
+        // the literals introduced in the user function.
+        if (ir::shouldObfuscate(F, "mutualguard",
+                                eff.mutual_guard.enabled.value_or(false))) {
+            passes::MutualGuardGraphParams p;
+            p.probability = eff.mutual_guard.probability.value_or(35);
+            p.nodes = eff.mutual_guard.nodes.value_or(3);
+            p.region_bytes = eff.mutual_guard.region_bytes.value_or(32);
+            p.max_returns = eff.mutual_guard.max_returns.value_or(2);
+            changed |= passes::mutualGuardGraphFunction(F, p, rng);
         }
 
         // Constant encryption hides the literals the other passes introduce.

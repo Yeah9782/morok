@@ -115,6 +115,22 @@ TEST_CASE("preset is the base and [passes.*] overrides it") {
     enabled = true
     probability = 92
     max_payloads = 3
+    [passes.self_checksum_constants]
+    enabled = true
+    probability = 83
+    max_constants = 6
+    region_bytes = 48
+    [passes.data_flow_integrity]
+    enabled = true
+    probability = 64
+    max_tables = 5
+    region_bytes = 72
+    [passes.mutual_guard_graph]
+    enabled = true
+    probability = 61
+    nodes = 4
+    region_bytes = 80
+    max_returns = 3
     [passes.path_explosion]
     enabled = true
     probability = 51
@@ -201,6 +217,19 @@ TEST_CASE("preset is the base and [passes.*] overrides it") {
     CHECK(r.config.passes.hash_self_decrypt.enabled == true);
     CHECK(r.config.passes.hash_self_decrypt.probability == 92u);
     CHECK(r.config.passes.hash_self_decrypt.max_payloads == 3u);
+    CHECK(r.config.passes.self_checksum.enabled == true);
+    CHECK(r.config.passes.self_checksum.probability == 83u);
+    CHECK(r.config.passes.self_checksum.max_constants == 6u);
+    CHECK(r.config.passes.self_checksum.region_bytes == 48u);
+    CHECK(r.config.passes.data_flow_integrity.enabled == true);
+    CHECK(r.config.passes.data_flow_integrity.probability == 64u);
+    CHECK(r.config.passes.data_flow_integrity.max_tables == 5u);
+    CHECK(r.config.passes.data_flow_integrity.region_bytes == 72u);
+    CHECK(r.config.passes.mutual_guard.enabled == true);
+    CHECK(r.config.passes.mutual_guard.probability == 61u);
+    CHECK(r.config.passes.mutual_guard.nodes == 4u);
+    CHECK(r.config.passes.mutual_guard.region_bytes == 80u);
+    CHECK(r.config.passes.mutual_guard.max_returns == 3u);
     CHECK(r.config.passes.path_explosion.enabled == true);
     CHECK(r.config.passes.path_explosion.probability == 51u);
     CHECK(r.config.passes.path_explosion.max_blocks == 4u);

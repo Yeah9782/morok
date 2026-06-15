@@ -106,6 +106,8 @@ Every obfuscation pass is implemented as a New-PM pass, each available standalon
 | Pointer laundering | `morok-ptrlaunder` | pointer/int round trips and byte-vector value views |
 | Type punning | `morok-typepun` | union-buffer scalar reinterpretation chains |
 | PHI tangling | `morok-phitangle` | redundant cross-block PHI webs |
+| Data-flow integrity | `morok-dfi` | byte lookup tables decoded from runtime integrity hashes |
+| Mutual guard graph | `morok-mutualguard` | overlapping checksum nodes whose aggregate diff poisons returns |
 | Table arithmetic | `morok-tablearith` | byte arithmetic lowered to encrypted lookup tables |
 | Uniform primitive lowering | `morok-uniform` | byte ops and direct branches lowered to table/memory dispatch |
 | Virtualization | `morok-vm` | selected straight-line integer functions lifted to encrypted threaded bytecode VMs |
@@ -127,6 +129,7 @@ Every obfuscation pass is implemented as a New-PM pass, each available standalon
 | Chaos state machine | `morok-csm` | flattening driven by the logistic map |
 | Dispatcherless routing | `morok-dispatchless` | branch/switch edges → state-entangled `indirectbr` DAG |
 | Vector obfuscation | `morok-vec` | scalar integer ops/comparisons lifted to configurable SIMD |
+| Self-checksum constants | `morok-selfcheck` | constants fused with runtime checksum diff so tamper corrupts data |
 | Constant encryption | `morok-constenc` | literals split into XOR shares |
 | String encryption | `morok-strenc` | literals stored GF(2⁸)-encrypted, decrypted in a ctor |
 | Indirect branch | `morok-indbr` | conditional edges → keyed `indirectbr` table |

@@ -23,6 +23,7 @@
 #include "morok/passes/CoherentDecoys.hpp"
 #include "morok/passes/ConstantEncryption.hpp"
 #include "morok/passes/DataEntangledFlattening.hpp"
+#include "morok/passes/DataFlowIntegrity.hpp"
 #include "morok/passes/DispatcherlessRouting.hpp"
 #include "morok/passes/Flattening.hpp"
 #include "morok/passes/FunctionCallObfuscate.hpp"
@@ -31,11 +32,13 @@
 #include "morok/passes/IndirectBranch.hpp"
 #include "morok/passes/InterproceduralFsm.hpp"
 #include "morok/passes/Mba.hpp"
+#include "morok/passes/MutualGuardGraph.hpp"
 #include "morok/passes/NonInvertibleState.hpp"
 #include "morok/passes/OptimizerAmplification.hpp"
 #include "morok/passes/PathExplosion.hpp"
 #include "morok/passes/PhiTangling.hpp"
 #include "morok/passes/PointerLaundering.hpp"
+#include "morok/passes/SelfChecksumConstants.hpp"
 #include "morok/passes/SplitBasicBlocks.hpp"
 #include "morok/passes/StackCoalescing.hpp"
 #include "morok/passes/StateOpaquePredicates.hpp"
@@ -232,6 +235,14 @@ PassPluginLibraryInfo getPluginInfo() {
                             FPM.addPass(passes::ConstantEncryptionPass());
                             return true;
                         }
+                        if (name == "morok-selfcheck") {
+                            FPM.addPass(passes::SelfChecksumConstantsPass());
+                            return true;
+                        }
+                        if (name == "morok-mutualguard") {
+                            FPM.addPass(passes::MutualGuardGraphPass());
+                            return true;
+                        }
                         if (name == "morok-split") {
                             FPM.addPass(passes::SplitBasicBlocksPass());
                             return true;
@@ -290,6 +301,10 @@ PassPluginLibraryInfo getPluginInfo() {
                         }
                         if (name == "morok-tablearith") {
                             FPM.addPass(passes::ArithmeticTablesPass());
+                            return true;
+                        }
+                        if (name == "morok-dfi") {
+                            FPM.addPass(passes::DataFlowIntegrityPass());
                             return true;
                         }
                         if (name == "morok-uniform") {

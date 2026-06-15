@@ -151,6 +151,27 @@ void merge(PassConfig &dst, const PassConfig &src) {
              src.hash_self_decrypt.probability);
     mergeOpt(dst.hash_self_decrypt.max_payloads,
              src.hash_self_decrypt.max_payloads);
+    // Self-checksum-fused constants
+    mergeOpt(dst.self_checksum.enabled, src.self_checksum.enabled);
+    mergeOpt(dst.self_checksum.probability, src.self_checksum.probability);
+    mergeOpt(dst.self_checksum.max_constants,
+             src.self_checksum.max_constants);
+    mergeOpt(dst.self_checksum.region_bytes, src.self_checksum.region_bytes);
+    // Data-flow-entangled integrity
+    mergeOpt(dst.data_flow_integrity.enabled,
+             src.data_flow_integrity.enabled);
+    mergeOpt(dst.data_flow_integrity.probability,
+             src.data_flow_integrity.probability);
+    mergeOpt(dst.data_flow_integrity.max_tables,
+             src.data_flow_integrity.max_tables);
+    mergeOpt(dst.data_flow_integrity.region_bytes,
+             src.data_flow_integrity.region_bytes);
+    // Mutual guard graph
+    mergeOpt(dst.mutual_guard.enabled, src.mutual_guard.enabled);
+    mergeOpt(dst.mutual_guard.probability, src.mutual_guard.probability);
+    mergeOpt(dst.mutual_guard.nodes, src.mutual_guard.nodes);
+    mergeOpt(dst.mutual_guard.region_bytes, src.mutual_guard.region_bytes);
+    mergeOpt(dst.mutual_guard.max_returns, src.mutual_guard.max_returns);
     // Path explosion
     mergeOpt(dst.path_explosion.enabled, src.path_explosion.enabled);
     mergeOpt(dst.path_explosion.probability, src.path_explosion.probability);

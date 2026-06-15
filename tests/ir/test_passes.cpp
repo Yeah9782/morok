@@ -17,6 +17,7 @@
 #include "morok/passes/CoherentDecoys.hpp"
 #include "morok/passes/ConstantEncryption.hpp"
 #include "morok/passes/DataEntangledFlattening.hpp"
+#include "morok/passes/DataFlowIntegrity.hpp"
 #include "morok/passes/DispatcherlessRouting.hpp"
 #include "morok/passes/Flattening.hpp"
 #include "morok/passes/FunctionCallObfuscate.hpp"
@@ -25,11 +26,13 @@
 #include "morok/passes/IndirectBranch.hpp"
 #include "morok/passes/InterproceduralFsm.hpp"
 #include "morok/passes/Mba.hpp"
+#include "morok/passes/MutualGuardGraph.hpp"
 #include "morok/passes/NonInvertibleState.hpp"
 #include "morok/passes/OptimizerAmplification.hpp"
 #include "morok/passes/PathExplosion.hpp"
 #include "morok/passes/PhiTangling.hpp"
 #include "morok/passes/PointerLaundering.hpp"
+#include "morok/passes/SelfChecksumConstants.hpp"
 #include "morok/passes/SplitBasicBlocks.hpp"
 #include "morok/passes/StackCoalescing.hpp"
 #include "morok/passes/StateOpaquePredicates.hpp"
@@ -1543,6 +1546,109 @@ TEST_CASE("tableArithmeticFunction skips non-byte arithmetic") {
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("dataFlowIntegrityFunction derives table values from integrity hash") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i8 @dfi(i8 %a, i8 %b) {
+entry:
+  %x = xor i8 %a, %b
+  ret i8 %x
+}
+)ir");
+    Function *F = M->getFunction("dfi");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(84);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::dataFlowIntegrityFunction(
+        *F, {/*probability=*/100, /*max_tables=*/1, /*region_bytes=*/32},
+        rng));
+
+    CHECK(countGlobals(*M, "morok.dfi.table") == 1u);
+    CHECK(countGlobals(*M, "morok.dfi.region") == 1u);
+    CHECK(countGlobals(*M, "morok.dfi.expected") == 1u);
+
+    Function *Hash = M->getFunction("morok.dfi.hash.dfi");
+    REQUIRE(Hash);
+
+    bool callsHash = false;
+    bool hasTableLoad = false;
+    bool hasDecodedValue = false;
+    for (Instruction &I : instructions(*F)) {
+        if (auto *CI = dyn_cast<CallInst>(&I))
+            callsHash |= CI->getCalledFunction() == Hash;
+        if (auto *LI = dyn_cast<LoadInst>(&I))
+            hasTableLoad |=
+                LI->isVolatile() &&
+                LI->getPointerOperand()->getName().starts_with(
+                    "morok.dfi.cell");
+        hasDecodedValue |= I.getName().starts_with("morok.dfi.value");
+    }
+
+    bool hasVolatileRegionLoad = false;
+    bool hasVolatileExpectedLoad = false;
+    for (Instruction &I : instructions(*Hash)) {
+        if (auto *LI = dyn_cast<LoadInst>(&I)) {
+            hasVolatileRegionLoad |=
+                LI->isVolatile() &&
+                LI->getPointerOperand()->getName().starts_with(
+                    "morok.dfi.region.ptr");
+            hasVolatileExpectedLoad |=
+                LI->isVolatile() &&
+                LI->getPointerOperand()->getName().starts_with(
+                    "morok.dfi.expected");
+        }
+    }
+
+    bool encryptedDiffersFromPlain = false;
+    for (GlobalVariable &GV : M->globals()) {
+        if (!GV.getName().starts_with("morok.dfi.table"))
+            continue;
+        auto *CDA = dyn_cast<ConstantDataArray>(GV.getInitializer());
+        REQUIRE(CDA);
+        for (unsigned idx = 0; idx < 256; ++idx) {
+            const auto lhs = static_cast<std::uint8_t>(idx >> 8);
+            const auto rhs = static_cast<std::uint8_t>(idx & 0xFFu);
+            const auto plain = static_cast<std::uint8_t>(lhs ^ rhs);
+            if (CDA->getElementAsInteger(idx) != plain) {
+                encryptedDiffersFromPlain = true;
+                break;
+            }
+        }
+    }
+
+    CHECK(callsHash);
+    CHECK(hasTableLoad);
+    CHECK(hasDecodedValue);
+    CHECK(hasVolatileRegionLoad);
+    CHECK(hasVolatileExpectedLoad);
+    CHECK(encryptedDiffersFromPlain);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("dataFlowIntegrityFunction honors zero probability") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i8 @dfi_zero(i8 %a, i8 %b) {
+entry:
+  %x = xor i8 %a, %b
+  ret i8 %x
+}
+)ir");
+    Function *F = M->getFunction("dfi_zero");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(85);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK_FALSE(morok::passes::dataFlowIntegrityFunction(
+        *F, {/*probability=*/0, /*max_tables=*/1, /*region_bytes=*/32},
+        rng));
+    CHECK(hasPlainI8Arithmetic(*F));
+    CHECK(countGlobals(*M, "morok.dfi.table") == 0u);
+    CHECK(M->getFunction("morok.dfi.hash.dfi_zero") == nullptr);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("uniformPrimitiveLowerFunction table-lowers ops and branch dispatch") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
@@ -1829,6 +1935,219 @@ entry:
         *M, {/*probability=*/0, /*max_payloads=*/4}, rng));
     CHECK(countGlobals(*M, "morok.sdb.ready") == 0u);
     CHECK(M->getFunction("morok.sdb.ensure.vm_zero") == nullptr);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("selfChecksumConstantsFunction fuses constants with checksum data") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @selfcheck(i32 %a) {
+entry:
+  %x = xor i32 %a, 305419896
+  %y = add i32 %x, 17
+  ret i32 %y
+}
+)ir");
+    Function *F = M->getFunction("selfcheck");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(181);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::selfChecksumConstantsFunction(
+        *F, {/*probability=*/100, /*max_constants=*/8, /*region_bytes=*/32},
+        rng));
+
+    CHECK(countGlobals(*M, "morok.sc.region") == 1u);
+    CHECK(countGlobals(*M, "morok.sc.expected") == 1u);
+    CHECK(countGlobals(*M, "morok.sc.mask") == 2u);
+
+    Function *Diff = M->getFunction("morok.sc.diff.selfcheck");
+    REQUIRE(Diff);
+
+    bool callsDiff = false;
+    bool hasConstMix = false;
+    bool hasTrap = false;
+    bool hasVolatileMaskLoad = false;
+    for (Instruction &I : instructions(*F)) {
+        if (auto *CI = dyn_cast<CallInst>(&I))
+            callsDiff |= CI->getCalledFunction() == Diff;
+        hasConstMix |= I.getName().starts_with("morok.sc.const");
+        if (auto *LI = dyn_cast<LoadInst>(&I))
+            hasVolatileMaskLoad |=
+                LI->isVolatile() &&
+                LI->getPointerOperand()->getName().starts_with(
+                    "morok.sc.mask");
+    }
+
+    bool hasVolatileRegionLoad = false;
+    bool hasVolatileExpectedLoad = false;
+    bool hasDiffValue = false;
+    for (Instruction &I : instructions(*Diff)) {
+        hasDiffValue |= I.getName().starts_with("morok.sc.diff");
+        if (auto *CI = dyn_cast<CallInst>(&I))
+            if (Function *Callee = CI->getCalledFunction())
+                hasTrap |= Callee->getName() == "llvm.trap";
+        if (auto *LI = dyn_cast<LoadInst>(&I)) {
+            hasVolatileRegionLoad |=
+                LI->isVolatile() &&
+                LI->getPointerOperand()->getName().starts_with(
+                    "morok.sc.region.ptr");
+            hasVolatileExpectedLoad |=
+                LI->isVolatile() &&
+                LI->getPointerOperand()->getName().starts_with(
+                    "morok.sc.expected");
+        }
+    }
+
+    CHECK(callsDiff);
+    CHECK(hasConstMix);
+    CHECK(hasVolatileMaskLoad);
+    CHECK(hasVolatileRegionLoad);
+    CHECK(hasVolatileExpectedLoad);
+    CHECK(hasDiffValue);
+    CHECK_FALSE(hasTrap);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("selfChecksumConstantsFunction honors zero probability") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @selfcheck_zero(i32 %a) {
+entry:
+  %x = add i32 %a, 99
+  ret i32 %x
+}
+)ir");
+    Function *F = M->getFunction("selfcheck_zero");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(182);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK_FALSE(morok::passes::selfChecksumConstantsFunction(
+        *F, {/*probability=*/0, /*max_constants=*/8, /*region_bytes=*/32},
+        rng));
+    CHECK(countGlobals(*M, "morok.sc.region") == 0u);
+    CHECK(M->getFunction("morok.sc.diff.selfcheck_zero") == nullptr);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("mutualGuardGraphFunction emits overlapping integrity nodes") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @mutual(i32 %a, i32 %b) {
+entry:
+  %x = xor i32 %a, %b
+  %y = add i32 %x, 7
+  ret i32 %y
+}
+)ir");
+    Function *F = M->getFunction("mutual");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(201);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::mutualGuardGraphFunction(
+        *F, {/*probability=*/100, /*nodes=*/3, /*region_bytes=*/32,
+             /*max_returns=*/1},
+        rng));
+
+    CHECK(countGlobals(*M, "morok.mg.region") == 3u);
+    CHECK(countGlobals(*M, "morok.mg.expected") == 3u);
+
+    Function *Diff = M->getFunction("morok.mg.diff.mutual");
+    REQUIRE(Diff);
+
+    std::vector<Function *> nodes;
+    for (unsigned i = 0; i != 3; ++i) {
+        Function *Node =
+            M->getFunction("morok.mg.node.mutual." + std::to_string(i));
+        REQUIRE(Node);
+        nodes.push_back(Node);
+    }
+
+    bool callsDiff = false;
+    bool hasReturnPoison = false;
+    bool hasTrap = false;
+    for (Instruction &I : instructions(*F)) {
+        if (auto *CI = dyn_cast<CallInst>(&I)) {
+            callsDiff |= CI->getCalledFunction() == Diff;
+            if (Function *Callee = CI->getCalledFunction())
+                hasTrap |= Callee->getName() == "llvm.trap";
+        }
+        hasReturnPoison |= I.getName().starts_with("morok.mg.value");
+    }
+
+    unsigned nodeCalls = 0;
+    bool hasGraphDiff = false;
+    for (Instruction &I : instructions(*Diff)) {
+        hasGraphDiff |= I.getName().starts_with("morok.mg.diff");
+        if (auto *CI = dyn_cast<CallInst>(&I)) {
+            if (Function *Callee = CI->getCalledFunction()) {
+                hasTrap |= Callee->getName() == "llvm.trap";
+                if (std::find(nodes.begin(), nodes.end(), Callee) !=
+                    nodes.end())
+                    ++nodeCalls;
+            }
+        }
+    }
+
+    for (Function *Node : nodes) {
+        bool hasRegionLoad = false;
+        unsigned expectedLoads = 0;
+        bool hasPeerMix = false;
+        bool hasNodeDiff = false;
+        for (Instruction &I : instructions(*Node)) {
+            hasPeerMix |= I.getName().starts_with("morok.mg.peer");
+            hasNodeDiff |= I.getName().starts_with("morok.mg.node.diff");
+            if (auto *CI = dyn_cast<CallInst>(&I))
+                if (Function *Callee = CI->getCalledFunction())
+                    hasTrap |= Callee->getName() == "llvm.trap";
+            if (auto *LI = dyn_cast<LoadInst>(&I)) {
+                hasRegionLoad |=
+                    LI->isVolatile() &&
+                    LI->getPointerOperand()->getName().starts_with(
+                        "morok.mg.region.ptr");
+                if (LI->isVolatile() &&
+                    LI->getPointerOperand()->getName().starts_with(
+                        "morok.mg.expected"))
+                    ++expectedLoads;
+            }
+        }
+        CHECK(hasRegionLoad);
+        CHECK(expectedLoads >= 3u);
+        CHECK(hasPeerMix);
+        CHECK(hasNodeDiff);
+    }
+
+    CHECK(callsDiff);
+    CHECK(hasReturnPoison);
+    CHECK(nodeCalls == 3u);
+    CHECK(hasGraphDiff);
+    CHECK_FALSE(hasTrap);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("mutualGuardGraphFunction honors zero probability") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @mutual_zero(i32 %a, i32 %b) {
+entry:
+  %x = add i32 %a, %b
+  ret i32 %x
+}
+)ir");
+    Function *F = M->getFunction("mutual_zero");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(202);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK_FALSE(morok::passes::mutualGuardGraphFunction(
+        *F, {/*probability=*/0, /*nodes=*/3, /*region_bytes=*/32,
+             /*max_returns=*/1},
+        rng));
+    CHECK(countGlobals(*M, "morok.mg.region") == 0u);
+    CHECK(countGlobals(*M, "morok.mg.expected") == 0u);
+    CHECK(M->getFunction("morok.mg.diff.mutual_zero") == nullptr);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 

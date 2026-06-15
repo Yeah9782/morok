@@ -158,6 +158,28 @@ struct HashSelfDecryptConfig {
     Opt<std::uint32_t> max_payloads;
 };
 
+struct SelfChecksumConfig {
+    Opt<bool> enabled;
+    Opt<std::uint32_t> probability;
+    Opt<std::uint32_t> max_constants;
+    Opt<std::uint32_t> region_bytes;
+};
+
+struct DataFlowIntegrityConfig {
+    Opt<bool> enabled;
+    Opt<std::uint32_t> probability;
+    Opt<std::uint32_t> max_tables;
+    Opt<std::uint32_t> region_bytes;
+};
+
+struct MutualGuardConfig {
+    Opt<bool> enabled;
+    Opt<std::uint32_t> probability;
+    Opt<std::uint32_t> nodes;
+    Opt<std::uint32_t> region_bytes;
+    Opt<std::uint32_t> max_returns;
+};
+
 struct PathExplosionConfig {
     Opt<bool> enabled;
     Opt<std::uint32_t> probability;
@@ -238,6 +260,9 @@ struct PassConfig {
     UniformLowerConfig uniform_lower;
     VirtualizationConfig virtualization;
     HashSelfDecryptConfig hash_self_decrypt;
+    SelfChecksumConfig self_checksum;
+    DataFlowIntegrityConfig data_flow_integrity;
+    MutualGuardConfig mutual_guard;
     PathExplosionConfig path_explosion;
     TraceKeyConfig trace_keying;
     DispatcherlessConfig dispatcherless;

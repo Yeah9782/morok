@@ -17,6 +17,7 @@ add_library(morok_passes STATIC
   PhiTangling.cpp
   AliasOpaquePredicates.cpp
   CoherentDecoys.cpp
+  DataFlowIntegrity.cpp
   BogusControlFlow.cpp
   Flattening.cpp
   DataEntangledFlattening.cpp
@@ -29,6 +30,8 @@ add_library(morok_passes STATIC
   UniformPrimitiveLowering.cpp
   Virtualization.cpp
   HashGatedSelfDecrypt.cpp
+  SelfChecksumConstants.cpp
+  MutualGuardGraph.cpp
   PathExplosion.cpp
   TraceKeying.cpp
   DispatcherlessRouting.cpp

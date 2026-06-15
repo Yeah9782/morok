@@ -180,6 +180,29 @@ void parseHashSelfDecrypt(const toml::table &t, HashSelfDecryptConfig &c) {
     c.max_payloads = readU32(t["max_payloads"]);
 }
 
+void parseSelfChecksum(const toml::table &t, SelfChecksumConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.probability = readU32(t["probability"]);
+    c.max_constants = readU32(t["max_constants"]);
+    c.region_bytes = readU32(t["region_bytes"]);
+}
+
+void parseDataFlowIntegrity(const toml::table &t,
+                            DataFlowIntegrityConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.probability = readU32(t["probability"]);
+    c.max_tables = readU32(t["max_tables"]);
+    c.region_bytes = readU32(t["region_bytes"]);
+}
+
+void parseMutualGuard(const toml::table &t, MutualGuardConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.probability = readU32(t["probability"]);
+    c.nodes = readU32(t["nodes"]);
+    c.region_bytes = readU32(t["region_bytes"]);
+    c.max_returns = readU32(t["max_returns"]);
+}
+
 void parsePathExplosion(const toml::table &t, PathExplosionConfig &c) {
     c.enabled = readBool(t["enabled"]);
     c.probability = readU32(t["probability"]);
@@ -285,6 +308,12 @@ void parsePasses(const toml::table &p, PassConfig &pc) {
         parseVirtualization(*t, pc.virtualization);
     if (auto *t = p["hash_gated_self_decrypt"].as_table())
         parseHashSelfDecrypt(*t, pc.hash_self_decrypt);
+    if (auto *t = p["self_checksum_constants"].as_table())
+        parseSelfChecksum(*t, pc.self_checksum);
+    if (auto *t = p["data_flow_integrity"].as_table())
+        parseDataFlowIntegrity(*t, pc.data_flow_integrity);
+    if (auto *t = p["mutual_guard_graph"].as_table())
+        parseMutualGuard(*t, pc.mutual_guard);
     if (auto *t = p["path_explosion"].as_table())
         parsePathExplosion(*t, pc.path_explosion);
     if (auto *t = p["execution_trace_keying"].as_table())

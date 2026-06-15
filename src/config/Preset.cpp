@@ -149,6 +149,22 @@ PassConfig makeLow() {
     c.hash_self_decrypt.probability = 0;
     c.hash_self_decrypt.max_payloads = 0;
 
+    c.self_checksum.enabled = false;
+    c.self_checksum.probability = 0;
+    c.self_checksum.max_constants = 0;
+    c.self_checksum.region_bytes = 0;
+
+    c.data_flow_integrity.enabled = false;
+    c.data_flow_integrity.probability = 0;
+    c.data_flow_integrity.max_tables = 0;
+    c.data_flow_integrity.region_bytes = 0;
+
+    c.mutual_guard.enabled = false;
+    c.mutual_guard.probability = 0;
+    c.mutual_guard.nodes = 0;
+    c.mutual_guard.region_bytes = 0;
+    c.mutual_guard.max_returns = 0;
+
     c.path_explosion.enabled = false;
     c.path_explosion.probability = 0;
     c.path_explosion.max_blocks = 0;
@@ -283,6 +299,22 @@ PassConfig makeMid() {
     c.hash_self_decrypt.enabled = false;
     c.hash_self_decrypt.probability = 0;
     c.hash_self_decrypt.max_payloads = 0;
+
+    c.self_checksum.enabled = false;
+    c.self_checksum.probability = 0;
+    c.self_checksum.max_constants = 0;
+    c.self_checksum.region_bytes = 0;
+
+    c.data_flow_integrity.enabled = false;
+    c.data_flow_integrity.probability = 0;
+    c.data_flow_integrity.max_tables = 0;
+    c.data_flow_integrity.region_bytes = 0;
+
+    c.mutual_guard.enabled = false;
+    c.mutual_guard.probability = 0;
+    c.mutual_guard.nodes = 0;
+    c.mutual_guard.region_bytes = 0;
+    c.mutual_guard.max_returns = 0;
 
     c.path_explosion.enabled = true;
     c.path_explosion.probability = 15;
@@ -424,6 +456,22 @@ PassConfig makeHigh() {
     c.hash_self_decrypt.enabled = true;
     c.hash_self_decrypt.probability = 100;
     c.hash_self_decrypt.max_payloads = 1;
+
+    c.self_checksum.enabled = true;
+    c.self_checksum.probability = 35;
+    c.self_checksum.max_constants = 8;
+    c.self_checksum.region_bytes = 32;
+
+    c.data_flow_integrity.enabled = true;
+    c.data_flow_integrity.probability = 35;
+    c.data_flow_integrity.max_tables = 2;
+    c.data_flow_integrity.region_bytes = 32;
+
+    c.mutual_guard.enabled = true;
+    c.mutual_guard.probability = 35;
+    c.mutual_guard.nodes = 3;
+    c.mutual_guard.region_bytes = 32;
+    c.mutual_guard.max_returns = 2;
 
     c.path_explosion.enabled = true;
     c.path_explosion.probability = 35;
