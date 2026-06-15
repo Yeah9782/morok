@@ -106,6 +106,8 @@ Every obfuscation pass is implemented as a New-PM pass, each available standalon
 | Pointer laundering | `morok-ptrlaunder` | pointer/int round trips and byte-vector value views |
 | Type punning | `morok-typepun` | union-buffer scalar reinterpretation chains |
 | PHI tangling | `morok-phitangle` | redundant cross-block PHI webs |
+| Adversarial merge/outline | `morok-afm` | unrelated functions fused behind selector dispatchers and shared helpers |
+| Per-build polymorphism | `morok-polymorph` | seed-driven function/block layout and neutral return anchors |
 | Data-flow integrity | `morok-dfi` | byte lookup tables decoded from runtime integrity hashes |
 | Mutual guard graph | `morok-mutualguard` | overlapping checksum nodes whose aggregate diff poisons returns |
 | Table arithmetic | `morok-tablearith` | byte arithmetic lowered to encrypted lookup tables |

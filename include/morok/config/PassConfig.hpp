@@ -180,6 +180,23 @@ struct MutualGuardConfig {
     Opt<std::uint32_t> max_returns;
 };
 
+struct AdversarialMergeConfig {
+    Opt<bool> enabled;
+    Opt<std::uint32_t> probability;
+    Opt<std::uint32_t> max_groups;
+    Opt<std::uint32_t> max_functions;
+    Opt<std::uint32_t> outline_probability;
+    Opt<std::uint32_t> max_outlines;
+};
+
+struct PerBuildPolymorphismConfig {
+    Opt<bool> enabled;
+    Opt<bool> function_order;
+    Opt<bool> block_order;
+    Opt<std::uint32_t> anchor_probability;
+    Opt<std::uint32_t> max_anchors;
+};
+
 struct PathExplosionConfig {
     Opt<bool> enabled;
     Opt<std::uint32_t> probability;
@@ -263,6 +280,8 @@ struct PassConfig {
     SelfChecksumConfig self_checksum;
     DataFlowIntegrityConfig data_flow_integrity;
     MutualGuardConfig mutual_guard;
+    AdversarialMergeConfig adversarial_merge;
+    PerBuildPolymorphismConfig per_build_polymorphism;
     PathExplosionConfig path_explosion;
     TraceKeyConfig trace_keying;
     DispatcherlessConfig dispatcherless;

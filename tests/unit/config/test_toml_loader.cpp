@@ -131,6 +131,19 @@ TEST_CASE("preset is the base and [passes.*] overrides it") {
     nodes = 4
     region_bytes = 80
     max_returns = 3
+    [passes.adversarial_function_merging]
+    enabled = true
+    probability = 57
+    max_groups = 2
+    max_functions = 5
+    outline_probability = 71
+    max_outlines = 9
+    [passes.per_build_polymorphism]
+    enabled = true
+    function_order = false
+    block_order = true
+    anchor_probability = 68
+    max_anchors = 12
     [passes.path_explosion]
     enabled = true
     probability = 51
@@ -230,6 +243,17 @@ TEST_CASE("preset is the base and [passes.*] overrides it") {
     CHECK(r.config.passes.mutual_guard.nodes == 4u);
     CHECK(r.config.passes.mutual_guard.region_bytes == 80u);
     CHECK(r.config.passes.mutual_guard.max_returns == 3u);
+    CHECK(r.config.passes.adversarial_merge.enabled == true);
+    CHECK(r.config.passes.adversarial_merge.probability == 57u);
+    CHECK(r.config.passes.adversarial_merge.max_groups == 2u);
+    CHECK(r.config.passes.adversarial_merge.max_functions == 5u);
+    CHECK(r.config.passes.adversarial_merge.outline_probability == 71u);
+    CHECK(r.config.passes.adversarial_merge.max_outlines == 9u);
+    CHECK(r.config.passes.per_build_polymorphism.enabled == true);
+    CHECK(r.config.passes.per_build_polymorphism.function_order == false);
+    CHECK(r.config.passes.per_build_polymorphism.block_order == true);
+    CHECK(r.config.passes.per_build_polymorphism.anchor_probability == 68u);
+    CHECK(r.config.passes.per_build_polymorphism.max_anchors == 12u);
     CHECK(r.config.passes.path_explosion.enabled == true);
     CHECK(r.config.passes.path_explosion.probability == 51u);
     CHECK(r.config.passes.path_explosion.max_blocks == 4u);

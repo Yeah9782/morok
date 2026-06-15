@@ -203,6 +203,25 @@ void parseMutualGuard(const toml::table &t, MutualGuardConfig &c) {
     c.max_returns = readU32(t["max_returns"]);
 }
 
+void parseAdversarialMerge(const toml::table &t,
+                           AdversarialMergeConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.probability = readU32(t["probability"]);
+    c.max_groups = readU32(t["max_groups"]);
+    c.max_functions = readU32(t["max_functions"]);
+    c.outline_probability = readU32(t["outline_probability"]);
+    c.max_outlines = readU32(t["max_outlines"]);
+}
+
+void parsePerBuildPolymorphism(const toml::table &t,
+                               PerBuildPolymorphismConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.function_order = readBool(t["function_order"]);
+    c.block_order = readBool(t["block_order"]);
+    c.anchor_probability = readU32(t["anchor_probability"]);
+    c.max_anchors = readU32(t["max_anchors"]);
+}
+
 void parsePathExplosion(const toml::table &t, PathExplosionConfig &c) {
     c.enabled = readBool(t["enabled"]);
     c.probability = readU32(t["probability"]);
@@ -314,6 +333,10 @@ void parsePasses(const toml::table &p, PassConfig &pc) {
         parseDataFlowIntegrity(*t, pc.data_flow_integrity);
     if (auto *t = p["mutual_guard_graph"].as_table())
         parseMutualGuard(*t, pc.mutual_guard);
+    if (auto *t = p["adversarial_function_merging"].as_table())
+        parseAdversarialMerge(*t, pc.adversarial_merge);
+    if (auto *t = p["per_build_polymorphism"].as_table())
+        parsePerBuildPolymorphism(*t, pc.per_build_polymorphism);
     if (auto *t = p["path_explosion"].as_table())
         parsePathExplosion(*t, pc.path_explosion);
     if (auto *t = p["execution_trace_keying"].as_table())

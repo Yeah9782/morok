@@ -7,6 +7,7 @@
 #==============================================================================
 
 add_library(morok_passes STATIC
+  AdversarialFunctionMerging.cpp
   Substitution.cpp
   Mba.cpp
   ConstantEncryption.cpp
@@ -26,6 +27,7 @@ add_library(morok_passes STATIC
   InterproceduralFsm.cpp
   ChaosStateMachine.cpp
   OptimizerAmplification.cpp
+  PerBuildPolymorphism.cpp
   ArithmeticTables.cpp
   UniformPrimitiveLowering.cpp
   Virtualization.cpp

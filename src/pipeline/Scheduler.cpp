@@ -10,6 +10,7 @@
 #include "morok/core/Xoshiro256.hpp"
 #include "morok/ir/Annotations.hpp"
 #include "morok/ir/IRRandom.hpp"
+#include "morok/passes/AdversarialFunctionMerging.hpp"
 #include "morok/passes/AliasOpaquePredicates.hpp"
 #include "morok/passes/AntiAnalysis.hpp"
 #include "morok/passes/ArithmeticTables.hpp"
@@ -31,6 +32,7 @@
 #include "morok/passes/NonInvertibleState.hpp"
 #include "morok/passes/OptimizerAmplification.hpp"
 #include "morok/passes/PathExplosion.hpp"
+#include "morok/passes/PerBuildPolymorphism.hpp"
 #include "morok/passes/PhiTangling.hpp"
 #include "morok/passes/PointerLaundering.hpp"
 #include "morok/passes/SelfChecksumConstants.hpp"
@@ -417,6 +419,24 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
         }
     }
 
+    // Late whole-module call-graph confusion: keep original symbols but route
+    // same-signature bodies through shared selector dispatchers, with selected
+    // scalar fragments outlined into shared noinline helpers.
+    if (config_.passes.adversarial_merge.enabled.value_or(false)) {
+        passes::AdversarialMergeParams p;
+        p.probability =
+            config_.passes.adversarial_merge.probability.value_or(25);
+        p.max_groups =
+            config_.passes.adversarial_merge.max_groups.value_or(1);
+        p.max_functions =
+            config_.passes.adversarial_merge.max_functions.value_or(4);
+        p.outline_probability =
+            config_.passes.adversarial_merge.outline_probability.value_or(35);
+        p.max_outlines =
+            config_.passes.adversarial_merge.max_outlines.value_or(8);
+        changed |= passes::adversarialFunctionMergingModule(M, p, rng);
+    }
+
     // Module-level call-site wrapping runs after the per-function transforms so
     // it proxies calls into already-obfuscated functions.
     if (config_.passes.func_wrap.enabled.value_or(false)) {
@@ -424,6 +444,22 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
         wp.probability = config_.passes.func_wrap.probability.value_or(50);
         wp.times = config_.passes.func_wrap.times.value_or(1);
         changed |= passes::functionWrapModule(M, wp, rng);
+    }
+
+    // Final seed-driven diversity layer: reorder the emitted IR layout and add
+    // neutral volatile return anchors after every other configured transform.
+    if (config_.passes.per_build_polymorphism.enabled.value_or(false)) {
+        passes::PerBuildPolymorphismParams p;
+        p.function_order =
+            config_.passes.per_build_polymorphism.function_order.value_or(true);
+        p.block_order =
+            config_.passes.per_build_polymorphism.block_order.value_or(true);
+        p.anchor_probability =
+            config_.passes.per_build_polymorphism.anchor_probability.value_or(
+                25);
+        p.max_anchors =
+            config_.passes.per_build_polymorphism.max_anchors.value_or(16);
+        changed |= passes::perBuildPolymorphismModule(M, p, rng);
     }
 
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();

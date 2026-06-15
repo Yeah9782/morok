@@ -165,6 +165,19 @@ PassConfig makeLow() {
     c.mutual_guard.region_bytes = 0;
     c.mutual_guard.max_returns = 0;
 
+    c.adversarial_merge.enabled = false;
+    c.adversarial_merge.probability = 0;
+    c.adversarial_merge.max_groups = 0;
+    c.adversarial_merge.max_functions = 0;
+    c.adversarial_merge.outline_probability = 0;
+    c.adversarial_merge.max_outlines = 0;
+
+    c.per_build_polymorphism.enabled = false;
+    c.per_build_polymorphism.function_order = false;
+    c.per_build_polymorphism.block_order = false;
+    c.per_build_polymorphism.anchor_probability = 0;
+    c.per_build_polymorphism.max_anchors = 0;
+
     c.path_explosion.enabled = false;
     c.path_explosion.probability = 0;
     c.path_explosion.max_blocks = 0;
@@ -315,6 +328,19 @@ PassConfig makeMid() {
     c.mutual_guard.nodes = 0;
     c.mutual_guard.region_bytes = 0;
     c.mutual_guard.max_returns = 0;
+
+    c.adversarial_merge.enabled = false;
+    c.adversarial_merge.probability = 0;
+    c.adversarial_merge.max_groups = 0;
+    c.adversarial_merge.max_functions = 0;
+    c.adversarial_merge.outline_probability = 0;
+    c.adversarial_merge.max_outlines = 0;
+
+    c.per_build_polymorphism.enabled = false;
+    c.per_build_polymorphism.function_order = false;
+    c.per_build_polymorphism.block_order = false;
+    c.per_build_polymorphism.anchor_probability = 0;
+    c.per_build_polymorphism.max_anchors = 0;
 
     c.path_explosion.enabled = true;
     c.path_explosion.probability = 15;
@@ -472,6 +498,19 @@ PassConfig makeHigh() {
     c.mutual_guard.nodes = 3;
     c.mutual_guard.region_bytes = 32;
     c.mutual_guard.max_returns = 2;
+
+    c.adversarial_merge.enabled = true;
+    c.adversarial_merge.probability = 25;
+    c.adversarial_merge.max_groups = 1;
+    c.adversarial_merge.max_functions = 4;
+    c.adversarial_merge.outline_probability = 35;
+    c.adversarial_merge.max_outlines = 8;
+
+    c.per_build_polymorphism.enabled = true;
+    c.per_build_polymorphism.function_order = true;
+    c.per_build_polymorphism.block_order = true;
+    c.per_build_polymorphism.anchor_probability = 25;
+    c.per_build_polymorphism.max_anchors = 16;
 
     c.path_explosion.enabled = true;
     c.path_explosion.probability = 35;

@@ -57,6 +57,8 @@ TEST_CASE("low preset matches the documented table") {
     CHECK(c.self_checksum.enabled == false);
     CHECK(c.data_flow_integrity.enabled == false);
     CHECK(c.mutual_guard.enabled == false);
+    CHECK(c.adversarial_merge.enabled == false);
+    CHECK(c.per_build_polymorphism.enabled == false);
     CHECK(c.path_explosion.enabled == false);
     CHECK(c.trace_keying.enabled == false);
     CHECK(c.dispatcherless.enabled == false);
@@ -123,6 +125,8 @@ TEST_CASE("mid preset matches the documented table") {
     CHECK(c.self_checksum.enabled == false);
     CHECK(c.data_flow_integrity.enabled == false);
     CHECK(c.mutual_guard.enabled == false);
+    CHECK(c.adversarial_merge.enabled == false);
+    CHECK(c.per_build_polymorphism.enabled == false);
     CHECK(c.path_explosion.enabled == true);
     CHECK(c.path_explosion.probability == 15u);
     CHECK(c.path_explosion.max_blocks == 2u);
@@ -222,6 +226,17 @@ TEST_CASE("high preset matches the documented table") {
     CHECK(c.mutual_guard.nodes == 3u);
     CHECK(c.mutual_guard.region_bytes == 32u);
     CHECK(c.mutual_guard.max_returns == 2u);
+    CHECK(c.adversarial_merge.enabled == true);
+    CHECK(c.adversarial_merge.probability == 25u);
+    CHECK(c.adversarial_merge.max_groups == 1u);
+    CHECK(c.adversarial_merge.max_functions == 4u);
+    CHECK(c.adversarial_merge.outline_probability == 35u);
+    CHECK(c.adversarial_merge.max_outlines == 8u);
+    CHECK(c.per_build_polymorphism.enabled == true);
+    CHECK(c.per_build_polymorphism.function_order == true);
+    CHECK(c.per_build_polymorphism.block_order == true);
+    CHECK(c.per_build_polymorphism.anchor_probability == 25u);
+    CHECK(c.per_build_polymorphism.max_anchors == 16u);
     CHECK(c.path_explosion.enabled == true);
     CHECK(c.path_explosion.probability == 35u);
     CHECK(c.path_explosion.max_blocks == 4u);

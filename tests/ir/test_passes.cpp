@@ -11,6 +11,7 @@
 #include "morok/ir/IRRandom.hpp"
 #include "morok/passes/AliasOpaquePredicates.hpp"
 #include "morok/passes/AntiAnalysis.hpp"
+#include "morok/passes/AdversarialFunctionMerging.hpp"
 #include "morok/passes/ArithmeticTables.hpp"
 #include "morok/passes/BogusControlFlow.hpp"
 #include "morok/passes/ChaosStateMachine.hpp"
@@ -30,6 +31,7 @@
 #include "morok/passes/NonInvertibleState.hpp"
 #include "morok/passes/OptimizerAmplification.hpp"
 #include "morok/passes/PathExplosion.hpp"
+#include "morok/passes/PerBuildPolymorphism.hpp"
 #include "morok/passes/PhiTangling.hpp"
 #include "morok/passes/PointerLaundering.hpp"
 #include "morok/passes/SelfChecksumConstants.hpp"
@@ -60,6 +62,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 using namespace llvm;
@@ -144,6 +147,29 @@ std::size_t countGlobals(Module &M, StringRef prefix) {
         if (GV.getName().starts_with(prefix))
             ++n;
     return n;
+}
+
+std::size_t countFunctions(Module &M, StringRef prefix) {
+    std::size_t n = 0;
+    for (Function &F : M)
+        if (F.getName().starts_with(prefix))
+            ++n;
+    return n;
+}
+
+std::vector<std::string> functionOrder(Module &M) {
+    std::vector<std::string> Names;
+    for (Function &F : M)
+        if (!F.isDeclaration())
+            Names.push_back(F.getName().str());
+    return Names;
+}
+
+std::vector<std::string> blockOrder(Function &F) {
+    std::vector<std::string> Names;
+    for (BasicBlock &BB : F)
+        Names.push_back(BB.getName().str());
+    return Names;
 }
 
 bool hasPlainI8Arithmetic(Function &F) {
@@ -2454,6 +2480,287 @@ define i32 @caller(i32 %x) {
     CHECK(morok::passes::functionWrapModule(*M, {/*prob=*/100, /*times=*/1},
                                             rng));
     CHECK(M->getFunction("morok.wrap") != nullptr);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("adversarialFunctionMergingModule fuses functions behind a selector") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @alpha(i32 %a, i32 %b) {
+entry:
+  %sum = add i32 %a, %b
+  %mix = xor i32 %sum, 7
+  ret i32 %mix
+}
+
+define i32 @beta(i32 %a, i32 %b) {
+entry:
+  %prod = mul i32 %a, %b
+  %mix = sub i32 %prod, 3
+  ret i32 %mix
+}
+
+define i32 @caller(i32 %x) {
+entry:
+  %a = call i32 @alpha(i32 %x, i32 5)
+  %b = call i32 @beta(i32 %x, i32 3)
+  %r = add i32 %a, %b
+  ret i32 %r
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(221);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::adversarialFunctionMergingModule(
+        *M, {/*probability=*/100, /*max_groups=*/1, /*max_functions=*/2,
+             /*outline_probability=*/100, /*max_outlines=*/4},
+        rng));
+
+    Function *Alpha = M->getFunction("alpha");
+    Function *Beta = M->getFunction("beta");
+    REQUIRE(Alpha);
+    REQUIRE(Beta);
+    CHECK(Alpha->hasFnAttribute(Attribute::NoInline));
+    CHECK(Beta->hasFnAttribute(Attribute::NoInline));
+
+    CHECK(countFunctions(*M, "morok.afm.dispatch") == 1u);
+    CHECK(countFunctions(*M, "morok.afm.impl") == 2u);
+    CHECK(countFunctions(*M, "morok.afm.outline") >= 1u);
+    CHECK(countGlobals(*M, "morok.afm.selector") == 2u);
+    CHECK(countGlobals(*M, "morok.afm.key") >= 2u);
+
+    Function *Dispatch = nullptr;
+    for (Function &F : *M)
+        if (F.getName().starts_with("morok.afm.dispatch"))
+            Dispatch = &F;
+    REQUIRE(Dispatch);
+    CHECK(Dispatch->hasFnAttribute(Attribute::NoInline));
+    CHECK(Dispatch->hasFnAttribute(Attribute::OptimizeNone));
+
+    bool dispatchHasSwitch = false;
+    unsigned dispatchImplCalls = 0;
+    for (Instruction &I : instructions(*Dispatch)) {
+        dispatchHasSwitch |= isa<SwitchInst>(&I);
+        if (auto *CI = dyn_cast<CallInst>(&I))
+            if (Function *Callee = CI->getCalledFunction())
+                if (Callee->getName().starts_with("morok.afm.impl"))
+                    ++dispatchImplCalls;
+    }
+
+    bool wrappersCallDispatch = false;
+    bool wrappersLoadSelectors = false;
+    for (Function *F : {Alpha, Beta}) {
+        bool callsDispatch = false;
+        bool loadsSelector = false;
+        for (Instruction &I : instructions(*F)) {
+            if (auto *CI = dyn_cast<CallInst>(&I))
+                callsDispatch |= CI->getCalledFunction() == Dispatch;
+            if (auto *LI = dyn_cast<LoadInst>(&I))
+                loadsSelector |=
+                    LI->isVolatile() &&
+                    LI->getPointerOperand()->getName().starts_with(
+                        "morok.afm.selector");
+        }
+        wrappersCallDispatch |= callsDispatch;
+        wrappersLoadSelectors |= loadsSelector;
+        CHECK(callsDispatch);
+        CHECK(loadsSelector);
+    }
+
+    bool outlineHelperHasVolatileKey = false;
+    bool implCallsOutline = false;
+    for (Function &F : *M) {
+        if (F.getName().starts_with("morok.afm.outline")) {
+            CHECK(F.hasFnAttribute(Attribute::NoInline));
+            CHECK(F.hasFnAttribute(Attribute::OptimizeNone));
+            for (Instruction &I : instructions(F))
+                if (auto *LI = dyn_cast<LoadInst>(&I))
+                    outlineHelperHasVolatileKey |=
+                        LI->isVolatile() &&
+                        LI->getPointerOperand()->getName().starts_with(
+                            "morok.afm.key");
+        }
+        if (!F.getName().starts_with("morok.afm.impl"))
+            continue;
+        for (Instruction &I : instructions(F))
+            if (auto *CI = dyn_cast<CallInst>(&I))
+                if (Function *Callee = CI->getCalledFunction())
+                    implCallsOutline |=
+                        Callee->getName().starts_with("morok.afm.outline");
+    }
+
+    CHECK(dispatchHasSwitch);
+    CHECK(dispatchImplCalls == 2u);
+    CHECK(wrappersCallDispatch);
+    CHECK(wrappersLoadSelectors);
+    CHECK(outlineHelperHasVolatileKey);
+    CHECK(implCallsOutline);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("adversarialFunctionMergingModule honors zero probability") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @afm_a(i32 %a, i32 %b) {
+entry:
+  %x = add i32 %a, %b
+  ret i32 %x
+}
+
+define i32 @afm_b(i32 %a, i32 %b) {
+entry:
+  %x = xor i32 %a, %b
+  ret i32 %x
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(222);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK_FALSE(morok::passes::adversarialFunctionMergingModule(
+        *M, {/*probability=*/0, /*max_groups=*/1, /*max_functions=*/2,
+             /*outline_probability=*/100, /*max_outlines=*/4},
+        rng));
+    CHECK(countFunctions(*M, "morok.afm.dispatch") == 0u);
+    CHECK(countFunctions(*M, "morok.afm.impl") == 0u);
+    CHECK(countGlobals(*M, "morok.afm.selector") == 0u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("perBuildPolymorphismModule diversifies layout and anchors returns") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @poly_a(i32 %x) {
+entry:
+  %c = icmp ult i32 %x, 10
+  br i1 %c, label %left, label %right
+left:
+  %l = add i32 %x, 3
+  br label %merge
+right:
+  %r = xor i32 %x, 7
+  br label %merge
+merge:
+  %p = phi i32 [ %l, %left ], [ %r, %right ]
+  ret i32 %p
+}
+
+define i32 @poly_b(i32 %x) {
+entry:
+  %y = mul i32 %x, 5
+  ret i32 %y
+}
+
+define i32 @poly_c(i32 %x) {
+entry:
+  %y = sub i32 %x, 11
+  ret i32 %y
+}
+)ir");
+    Function *A = M->getFunction("poly_a");
+    REQUIRE(A);
+    const auto BeforeFunctions = functionOrder(*M);
+    const auto BeforeBlocks = blockOrder(*A);
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(301);
+    morok::ir::IRRandom rng(engine);
+    CHECK(morok::passes::perBuildPolymorphismModule(
+        *M, {/*function_order=*/true, /*block_order=*/true,
+             /*anchor_probability=*/100, /*max_anchors=*/8},
+        rng));
+
+    CHECK(functionOrder(*M) != BeforeFunctions);
+    const auto AfterBlocks = blockOrder(*A);
+    REQUIRE_FALSE(AfterBlocks.empty());
+    CHECK(AfterBlocks.front() == "entry");
+    CHECK(AfterBlocks != BeforeBlocks);
+    CHECK(countGlobals(*M, "morok.poly.salt") == 3u);
+
+    bool hasVolatileSalt = false;
+    bool hasAnchoredReturn = false;
+    for (Function &F : *M) {
+        if (F.isDeclaration() || F.getName().starts_with("morok."))
+            continue;
+        for (Instruction &I : instructions(F)) {
+            hasAnchoredReturn |= I.getName().starts_with("morok.poly.value");
+            if (auto *LI = dyn_cast<LoadInst>(&I))
+                hasVolatileSalt |=
+                    LI->isVolatile() &&
+                    LI->getPointerOperand()->getName().starts_with(
+                        "morok.poly.salt");
+        }
+    }
+
+    CHECK(hasVolatileSalt);
+    CHECK(hasAnchoredReturn);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("perBuildPolymorphismModule is reproducible and seed-diverse") {
+    constexpr const char *IR = R"ir(
+define i32 @poly_seed_a(i32 %x) {
+entry:
+  %y = add i32 %x, 1
+  ret i32 %y
+}
+
+define i32 @poly_seed_b(i32 %x) {
+entry:
+  %y = xor i32 %x, 9
+  ret i32 %y
+}
+
+define i32 @poly_seed_c(i32 %x) {
+entry:
+  %y = mul i32 %x, 3
+  ret i32 %y
+}
+)ir";
+
+    auto render = [&](std::uint64_t Seed) {
+        LLVMContext ctx;
+        auto M = parse(ctx, IR);
+        auto engine = morok::core::Xoshiro256pp::fromSeed(Seed);
+        morok::ir::IRRandom rng(engine);
+        CHECK(morok::passes::perBuildPolymorphismModule(
+            *M, {/*function_order=*/true, /*block_order=*/true,
+                 /*anchor_probability=*/100, /*max_anchors=*/8},
+            rng));
+        std::string Text;
+        raw_string_ostream OS(Text);
+        M->print(OS, nullptr);
+        return OS.str();
+    };
+
+    const std::string A = render(302);
+    const std::string B = render(302);
+    const std::string C = render(303);
+    CHECK(A == B);
+    CHECK(A != C);
+}
+
+TEST_CASE("perBuildPolymorphismModule honors disabled knobs") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @poly_off_a(i32 %x) {
+entry:
+  %y = add i32 %x, 1
+  ret i32 %y
+}
+
+define i32 @poly_off_b(i32 %x) {
+entry:
+  %y = sub i32 %x, 1
+  ret i32 %y
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(304);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK_FALSE(morok::passes::perBuildPolymorphismModule(
+        *M, {/*function_order=*/false, /*block_order=*/false,
+             /*anchor_probability=*/0, /*max_anchors=*/0},
+        rng));
+    CHECK(countGlobals(*M, "morok.poly.salt") == 0u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 

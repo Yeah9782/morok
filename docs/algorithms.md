@@ -425,6 +425,55 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   encryption, so it sees late control/data shape while ordinary literal
   encryption can still obscure constants introduced in the user function.
 
+## Adversarial function merging + outlining — IR structure
+- This is the IR half of the roadmap's IR/MIR item.  It groups unrelated
+  same-signature, same-calling-convention functions and keeps their original
+  symbols as noinline wrappers.  The original bodies are cloned to internal
+  `morok.afm.impl.*` functions.
+- Each group receives one internal noinline/optnone
+  `morok.afm.dispatch.*` helper.  Wrappers recover a hidden selector from two
+  volatile private globals (`morok.afm.selector.*` and `morok.afm.key.*`) and
+  call the shared dispatcher, whose switch calls the selected implementation.
+  Function identity is preserved for external callers while call-graph recovery
+  sees unrelated functions converge through one hidden selector surface.
+- Selected scalar integer `add/sub/mul/and/or/xor` fragments inside the cloned
+  implementations are outlined into shared noinline/optnone
+  `morok.afm.outline.*` helpers.  Helpers include volatile key loads whose xor
+  contributes a semantic zero, so they remain side-effecting to the optimizer
+  while returning the original operation result.
+- The pass skips varargs, declarations, generated `morok.*` functions,
+  personality/EH functions, noreturn/naked functions, and functions already
+  referenced by `blockaddress` constants.  The last guard avoids cloning
+  post-dispatcher jump tables whose entries are tied to the original function's
+  basic blocks.
+- Scheduler placement is a late module step after the per-function
+  transformations and before FunctionWrapper.  That lets the pass perturb final
+  function boundaries while FunctionWrapper can still proxy ordinary call sites
+  afterwards; generated `morok.afm.*` helpers are skipped by later wrappers.
+
+## Per-build polymorphism — final IR diversity
+- This is an explicit final diversity layer over the shared seeded PRNG.  With
+  an explicit `-morok-seed`, the same input and configuration reproduce the same
+  IR; different seeds perturb layout and salt initializers without changing
+  runtime semantics.
+- The pass shuffles defined function order at module scope and shuffles each
+  function's non-entry basic blocks using LLVM list operations.  Entry blocks
+  stay first, and no CFG edge is retargeted, so PHI and branch semantics are
+  preserved while textual IR and backend layout inputs vary per build.
+- Selected integer returns receive a neutral volatile anchor:
+  two volatile loads from the same private mutable `morok.poly.salt.*` global
+  are xored to zero, truncated to the return width, and xored into the returned
+  value as `morok.poly.value`.  The salt initializer is seed-dependent and the
+  volatile loads keep the zero term visible to later analysis.
+- The pass is idempotent once any `morok.poly.*` global exists.  It also relaxes
+  memory-effect attributes on anchored functions and their callers, because the
+  inserted volatile loads make previous readnone/readonly/nosync summaries too
+  strong.
+- Scheduler placement is after FunctionWrapper as the final obfuscating pass
+  before feature elimination and cleanup.  That lets the layer diversify the
+  complete function set, including wrappers and helpers emitted by earlier
+  stages.
+
 ## Vector obfuscation — IR structure
 - Eligible scalar integer binary ops are lifted to `<N x iM>` operations, where
   `N = width / M` for configured widths 128, 256, or 512 bits.  Lane `realLane`
@@ -512,6 +561,8 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 - Virtualization: encrypted per-function bytecode plus threaded computed-goto VM helpers.
 - HashGatedSelfDecrypt: VM bytecode globals get a hash-gated lazy outer decryptor.
 - MutualGuardGraph: overlapping checksum nodes whose combined diff poisons returns.
+- AdversarialFunctionMerging: same-signature functions routed through shared selector dispatchers plus outlined scalar helpers.
+- PerBuildPolymorphism: seed-driven function/block order and volatile-zero return anchors.
 - PathExplosion: opaque-guarded input-derived loops with volatile symbolic stores and indirectbr dispatch.
 - TraceKeying: edge-carried rolling trace accumulator with guards and neutral poisoning.
 - SelfChecksumConstants: constants XORed with runtime checksum diffs for data-only tamper corruption.
@@ -522,5 +573,5 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 
 ## Scheduler order (to preserve semantics)
 AntiHook → AntiClassDump → FCO(fn) → AntiDebug → StringEnc → Virtualization → HashSelfDecrypt → per-fn{ Split, BCF, OptAmp, Sub,
-MBA, AliasOp, CoherentDecoys, NiState/EntFla/CSM/Flatten, StateOp, IFSM, PhiTangle, TypePun, StackCoalesce, PointerLaunder, DataFlowIntegrity, TableArith, Uniform, Vec, PathExplosion, TraceKeying, Dispatcherless, SelfChecksum, MutualGuardGraph } → ConstEnc → IndirectBranch → FunctionWrapper →
+MBA, AliasOp, CoherentDecoys, NiState/EntFla/CSM/Flatten, StateOp, IFSM, PhiTangle, TypePun, StackCoalesce, PointerLaunder, DataFlowIntegrity, TableArith, Uniform, Vec, PathExplosion, TraceKeying, Dispatcherless, SelfChecksum, MutualGuardGraph } → ConstEnc → IndirectBranch → AdversarialFunctionMerging → FunctionWrapper → PerBuildPolymorphism →
 FeatureElimination (strip debug/names) → cleanup marker decls.

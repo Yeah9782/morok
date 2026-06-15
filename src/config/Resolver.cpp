@@ -172,6 +172,29 @@ void merge(PassConfig &dst, const PassConfig &src) {
     mergeOpt(dst.mutual_guard.nodes, src.mutual_guard.nodes);
     mergeOpt(dst.mutual_guard.region_bytes, src.mutual_guard.region_bytes);
     mergeOpt(dst.mutual_guard.max_returns, src.mutual_guard.max_returns);
+    // Adversarial function merging + outlining
+    mergeOpt(dst.adversarial_merge.enabled, src.adversarial_merge.enabled);
+    mergeOpt(dst.adversarial_merge.probability,
+             src.adversarial_merge.probability);
+    mergeOpt(dst.adversarial_merge.max_groups,
+             src.adversarial_merge.max_groups);
+    mergeOpt(dst.adversarial_merge.max_functions,
+             src.adversarial_merge.max_functions);
+    mergeOpt(dst.adversarial_merge.outline_probability,
+             src.adversarial_merge.outline_probability);
+    mergeOpt(dst.adversarial_merge.max_outlines,
+             src.adversarial_merge.max_outlines);
+    // Per-build polymorphism
+    mergeOpt(dst.per_build_polymorphism.enabled,
+             src.per_build_polymorphism.enabled);
+    mergeOpt(dst.per_build_polymorphism.function_order,
+             src.per_build_polymorphism.function_order);
+    mergeOpt(dst.per_build_polymorphism.block_order,
+             src.per_build_polymorphism.block_order);
+    mergeOpt(dst.per_build_polymorphism.anchor_probability,
+             src.per_build_polymorphism.anchor_probability);
+    mergeOpt(dst.per_build_polymorphism.max_anchors,
+             src.per_build_polymorphism.max_anchors);
     // Path explosion
     mergeOpt(dst.path_explosion.enabled, src.path_explosion.enabled);
     mergeOpt(dst.path_explosion.probability, src.path_explosion.probability);

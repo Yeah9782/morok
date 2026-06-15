@@ -15,6 +15,7 @@
 #include "morok/config/Preset.hpp"
 #include "morok/config/Resolver.hpp"
 #include "morok/config/TomlLoader.hpp"
+#include "morok/passes/AdversarialFunctionMerging.hpp"
 #include "morok/passes/AliasOpaquePredicates.hpp"
 #include "morok/passes/AntiAnalysis.hpp"
 #include "morok/passes/ArithmeticTables.hpp"
@@ -36,6 +37,7 @@
 #include "morok/passes/NonInvertibleState.hpp"
 #include "morok/passes/OptimizerAmplification.hpp"
 #include "morok/passes/PathExplosion.hpp"
+#include "morok/passes/PerBuildPolymorphism.hpp"
 #include "morok/passes/PhiTangling.hpp"
 #include "morok/passes/PointerLaundering.hpp"
 #include "morok/passes/SelfChecksumConstants.hpp"
@@ -182,6 +184,15 @@ PassPluginLibraryInfo getPluginInfo() {
                         }
                         if (name == "morok-fco") {
                             MPM.addPass(passes::FunctionCallObfuscatePass());
+                            return true;
+                        }
+                        if (name == "morok-afm") {
+                            MPM.addPass(
+                                passes::AdversarialFunctionMergingPass());
+                            return true;
+                        }
+                        if (name == "morok-polymorph") {
+                            MPM.addPass(passes::PerBuildPolymorphismPass());
                             return true;
                         }
                         if (name == "morok-ifsm") {
