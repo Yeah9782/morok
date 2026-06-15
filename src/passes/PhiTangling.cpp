@@ -11,6 +11,7 @@
 
 #include "morok/passes/PhiTangling.hpp"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
@@ -83,8 +84,18 @@ PHINode *cloneDirectPhi(PHINode &PN, IntegerType *Ty) {
 PHINode *cloneEdgePhi(PHINode &PN, IntegerType *Ty, ir::IRRandom &rng) {
     auto *Copy =
         PHINode::Create(Ty, PN.getNumIncomingValues(), "morok.phi.edge", &PN);
-    for (unsigned i = 0; i < PN.getNumIncomingValues(); ++i)
-        Copy->addIncoming(edgeCopy(PN, i, Ty, rng), PN.getIncomingBlock(i));
+    // A predecessor can appear at more than one incoming index (callbr/asm-goto
+    // with duplicate targets, or `br` with both arms to one block).  Every
+    // entry for the same block must carry an identical value, so compute the
+    // edge copy once per distinct predecessor and reuse it.
+    DenseMap<BasicBlock *, Value *> PerBlock;
+    for (unsigned i = 0; i < PN.getNumIncomingValues(); ++i) {
+        BasicBlock *Pred = PN.getIncomingBlock(i);
+        auto It = PerBlock.find(Pred);
+        if (It == PerBlock.end())
+            It = PerBlock.try_emplace(Pred, edgeCopy(PN, i, Ty, rng)).first;
+        Copy->addIncoming(It->second, Pred);
+    }
     return Copy;
 }
 
