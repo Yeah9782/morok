@@ -2867,7 +2867,7 @@ merge:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_CASE("phiTangleFunction skips non-integer phis") {
+TEST_CASE("phiTangleFunction handles floating phis through bit carriers") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
 define double @joinf(double %a, double %b, i1 %c) {
@@ -2888,6 +2888,54 @@ merge:
     REQUIRE(F);
     const std::size_t before = countPhis(*F);
     auto engine = morok::core::Xoshiro256pp::fromSeed(51);
+    morok::ir::IRRandom rng(engine);
+    CHECK(morok::passes::phiTangleFunction(
+        *F, {/*probability=*/100, /*layers=*/1, /*max_phis=*/8}, rng));
+    CHECK(countPhis(*F) >= before + 2);
+
+    bool hasFpValue = false;
+    bool hasBitCarrier = false;
+    bool retUsesTangle = false;
+    for (Instruction &I : instructions(*F)) {
+        hasFpValue |= I.getName().starts_with("morok.phi.value") &&
+                      I.getType()->isDoubleTy();
+        if (auto *BC = dyn_cast<BitCastInst>(&I))
+            hasBitCarrier |=
+                BC->getName().starts_with("morok.phi") &&
+                ((BC->getSrcTy()->isDoubleTy() &&
+                  BC->getDestTy()->isIntegerTy(64)) ||
+                 (BC->getSrcTy()->isIntegerTy(64) &&
+                  BC->getDestTy()->isDoubleTy()));
+        if (auto *RI = dyn_cast<ReturnInst>(&I))
+            retUsesTangle =
+                RI->getReturnValue()->getName().starts_with("morok.phi.value");
+    }
+
+    CHECK(hasFpValue);
+    CHECK(hasBitCarrier);
+    CHECK(retUsesTangle);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("phiTangleFunction skips unsupported pointer phis") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define ptr @join_ptr(ptr %a, ptr %b, i1 %c) {
+entry:
+  br i1 %c, label %left, label %right
+left:
+  br label %merge
+right:
+  br label %merge
+merge:
+  %p = phi ptr [ %a, %left ], [ %b, %right ]
+  ret ptr %p
+}
+)ir");
+    Function *F = M->getFunction("join_ptr");
+    REQUIRE(F);
+    const std::size_t before = countPhis(*F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(511);
     morok::ir::IRRandom rng(engine);
     CHECK_FALSE(morok::passes::phiTangleFunction(
         *F, {/*probability=*/100, /*layers=*/2, /*max_phis=*/8}, rng));

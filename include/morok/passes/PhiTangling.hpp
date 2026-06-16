@@ -4,9 +4,9 @@
 //
 // morok/passes/PhiTangling.hpp — SSA/PHI web tangling.
 //
-// Builds redundant, cross-block PHI webs around existing integer PHIs.  Each
-// web is value-neutral but forces expression propagation and lvar recovery to
-// follow duplicated edge copies, PHIs, and zero-valued cross terms.
+// Builds redundant, cross-block PHI webs around existing scalar integer/FP
+// PHIs.  Each web is value-neutral but forces expression propagation and lvar
+// recovery to follow duplicated edge copies, PHIs, and zero-valued cross terms.
 
 #ifndef MOROK_PASSES_PHI_TANGLING_HPP
 #define MOROK_PASSES_PHI_TANGLING_HPP
@@ -30,7 +30,8 @@ struct PhiTangleParams {
     std::uint32_t max_phis = 32;    ///< per-function selected PHI cap
 };
 
-/// Tangle eligible integer PHIs in `F`.  Returns true if any web was inserted.
+/// Tangle eligible scalar integer/FP PHIs in `F`.  Returns true if any web was
+/// inserted.
 bool phiTangleFunction(llvm::Function &F, const PhiTangleParams &params,
                        morok::ir::IRRandom &rng);
 

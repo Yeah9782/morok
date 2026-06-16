@@ -263,14 +263,18 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   can be folded into the single opaque frame and then pointer-laundered.
 
 ## PHI tangling — IR structure
-- Eligible values are integer PHIs of any bit width with at least two normal
-  predecessor edges.  EH pads, landing pads, invoke predecessors, and generated
-  Morok PHIs are skipped so the inserted edge copies have legal placement and
-  do not reprocess the pass's own scaffolding.
+- Eligible values are scalar integer PHIs of any bit width and scalar
+  half/bfloat/float/double PHIs with at least two normal predecessor edges.  EH
+  pads, landing pads, invoke predecessors, unsupported aggregate/vector/pointer
+  PHIs, and generated Morok PHIs are skipped so the inserted edge copies have
+  legal placement and do not reprocess the pass's own scaffolding.
 - For each selected PHI incoming edge, the pass materializes an edge-local copy
-  `x ^ k ^ k`.  It then builds a copied edge PHI and a direct PHI over the same
-  incoming values, xors those together to form a zero cross-term, and xors that
-  term into the original value before replacing downstream non-generated uses.
+  `x ^ k ^ k`.  Floating-point incoming values are bitcast to equal-width
+  integer carriers for that xor and bitcast back before entering the copied edge
+  PHI.  It then builds a copied edge PHI and a direct PHI over the same incoming
+  values, xors those together over their integer carriers to form a zero
+  cross-term, and xors that term into the original value before replacing
+  downstream non-generated uses.
 - `layers` repeats the redundant web for the same selected value, while
   `max_phis` caps the number of selected PHIs after a per-build shuffle.  This
   gives decompilers extra cross-block SSA pressure without unbounded IR growth.
@@ -842,7 +846,7 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 - StackDeltaGames: dynamic stack saves/restores plus odd overlapping volatile stack slots.
 - PointerLaundering: pointer-int round trips + computed byte GEPs; scalar byte-vector bitcasts.
 - TypePunning: volatile union-buffer scalar↔vector/integer reinterpretation chains.
-- PhiTangling: redundant edge-copy/direct PHI webs; zero cross-terms rewrite uses.
+- PhiTangling: redundant scalar integer/FP edge-copy/direct PHI webs; zero cross-terms rewrite uses.
 - AliasOpaquePredicates: maintained pointer/alias memory invariant guards with decoy edges.
 - ExternalOpaquePredicates: IPO-blocked volatile context helper guards with scratch decoy edges.
 - CoherentDecoys: opaque-dead alternate return computations, not junk blocks.
