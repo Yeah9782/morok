@@ -1085,6 +1085,34 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("constantEncryptFunction rewrites conditional branch literals") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define void @const_branch() {
+entry:
+  br i1 true, label %left, label %right
+left:
+  ret void
+right:
+  ret void
+}
+)ir");
+    Function *F = M->getFunction("const_branch");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(506);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::constantEncryptFunction(
+        *F, {/*prob=*/100, /*k=*/3, /*iterations=*/1}, rng));
+
+    auto *BI = dyn_cast<BranchInst>(F->getEntryBlock().getTerminator());
+    REQUIRE(BI);
+    REQUIRE(BI->isConditional());
+    CHECK_FALSE(isa<ConstantInt>(BI->getCondition()));
+    CHECK(countGlobals(*M, "morok.share") == 3u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("constantEncryptFunction caps literal rewrites") {
     LLVMContext ctx;
     auto M = std::make_unique<Module>("const-cap", ctx);
@@ -1345,6 +1373,39 @@ entry:
                 Store = SI;
     REQUIRE(Store);
     CHECK_FALSE(isa<ConstantInt>(Store->getValueOperand()));
+    CHECK(countGlobals(*M, "morok.shamir.share") == 2u);
+    CHECK(countGlobals(*M, "morok.shamir.cell") == 2u);
+    CHECK(countCallsTo(*F, "morok.gf8mul") == 2u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("shamirShareFunction reconstructs conditional branch literals") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define void @shamir_branch() {
+entry:
+  br i1 false, label %left, label %right
+left:
+  ret void
+right:
+  ret void
+}
+)ir");
+    Function *F = M->getFunction("shamir_branch");
+    REQUIRE(F);
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(0x5355);
+    morok::ir::IRRandom rng(engine);
+    CHECK(morok::passes::shamirShareFunction(
+        *F,
+        {/*probability=*/100, /*threshold=*/2, /*shares=*/3,
+         /*max_secrets=*/1},
+        rng));
+
+    auto *BI = dyn_cast<BranchInst>(F->getEntryBlock().getTerminator());
+    REQUIRE(BI);
+    REQUIRE(BI->isConditional());
+    CHECK_FALSE(isa<ConstantInt>(BI->getCondition()));
     CHECK(countGlobals(*M, "morok.shamir.share") == 2u);
     CHECK(countGlobals(*M, "morok.shamir.cell") == 2u);
     CHECK(countCallsTo(*F, "morok.gf8mul") == 2u);
@@ -4248,6 +4309,42 @@ entry:
     CHECK(countGlobals(*M, "morok.sc.mask") == 1u);
     CHECK(countGlobals(*M, "morok.postlink.sc") == 1u);
     CHECK(M->getFunction("morok.sc.diff.selfcheck_store") != nullptr);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("selfChecksumConstantsFunction fuses conditional branch literals") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define void @selfcheck_branch() {
+entry:
+  br i1 true, label %left, label %right
+left:
+  ret void
+right:
+  ret void
+}
+)ir");
+    Function *F = M->getFunction("selfcheck_branch");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(1816);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::selfChecksumConstantsFunction(
+        *F, {/*probability=*/100, /*max_constants=*/1, /*region_bytes=*/32},
+        rng));
+
+    auto *BI = dyn_cast<BranchInst>(F->getEntryBlock().getTerminator());
+    REQUIRE(BI);
+    REQUIRE(BI->isConditional());
+    CHECK_FALSE(isa<ConstantInt>(BI->getCondition()));
+    CHECK(BI->getCondition()->getName().starts_with("morok.sc.const"));
+    CHECK(BI->getSuccessor(0)->getName() == "left");
+    CHECK(BI->getSuccessor(1)->getName() == "right");
+    CHECK(countGlobals(*M, "morok.sc.region") == 1u);
+    CHECK(countGlobals(*M, "morok.sc.expected") == 1u);
+    CHECK(countGlobals(*M, "morok.sc.mask") == 1u);
+    CHECK(countGlobals(*M, "morok.postlink.sc") == 1u);
+    CHECK(M->getFunction("morok.sc.diff.selfcheck_branch") != nullptr);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 

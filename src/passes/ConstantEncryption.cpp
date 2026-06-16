@@ -4,12 +4,13 @@
 //
 // morok/passes/ConstantEncryption.cpp
 //
-// Only operands of integer arithmetic, comparison, select, cast, return, store
-// values, and ordinary call-argument instructions are rewritten — never switch
-// cases, GEP indices, store pointers, intrinsic immediate arguments, callees,
-// or operand bundles, which must remain literal — so the output is always valid
-// IR. The XOR-share split is the verified one from morok/core/XorShare.hpp; the
-// shares live in private mutable globals and are read with volatile loads so the
+// Only operands of integer arithmetic, comparison, select, cast, conditional
+// branch conditions, return, store values, and ordinary call-argument
+// instructions are rewritten — never branch destinations, switch cases, GEP
+// indices, store pointers, intrinsic immediate arguments, callees, or operand
+// bundles, which must remain literal — so the output is always valid IR. The
+// XOR-share split is the verified one from morok/core/XorShare.hpp; the shares
+// live in private mutable globals and are read with volatile loads so the
 // reconstruction survives optimisation.
 
 #include "morok/passes/ConstantEncryption.hpp"
@@ -56,6 +57,15 @@ bool safeCallArgs(const CallBase &CB) {
 
 ConstantInt *eligibleStoreValue(StoreInst &SI) {
     auto *C = dyn_cast<ConstantInt>(SI.getValueOperand());
+    if (!C || !eligibleWidth(C->getType()->getIntegerBitWidth()))
+        return nullptr;
+    return C;
+}
+
+ConstantInt *eligibleBranchCondition(BranchInst &BI) {
+    if (!BI.isConditional())
+        return nullptr;
+    auto *C = dyn_cast<ConstantInt>(BI.getCondition());
     if (!C || !eligibleWidth(C->getType()->getIntegerBitWidth()))
         return nullptr;
     return C;
@@ -115,6 +125,9 @@ bool constantEncryptFunction(Function &F, const ConstEncParams &params,
                     }
                 } else if (auto *SI = dyn_cast<StoreInst>(&inst)) {
                     if (auto *C = eligibleStoreValue(*SI))
+                        targets.push_back({&inst, 0, C});
+                } else if (auto *BI = dyn_cast<BranchInst>(&inst)) {
+                    if (auto *C = eligibleBranchCondition(*BI))
                         targets.push_back({&inst, 0, C});
                 } else {
                     if (!isRewritableUser(inst))

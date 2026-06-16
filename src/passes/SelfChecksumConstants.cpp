@@ -91,6 +91,18 @@ ConstantInt *eligibleStoreValue(StoreInst &SI) {
     return C;
 }
 
+ConstantInt *eligibleBranchCondition(BranchInst &BI) {
+    if (!BI.isConditional())
+        return nullptr;
+    auto *C = dyn_cast<ConstantInt>(BI.getCondition());
+    if (!C)
+        return nullptr;
+    auto *Ty = dyn_cast<IntegerType>(C->getType());
+    if (!Ty || !eligibleWidth(Ty->getBitWidth()))
+        return nullptr;
+    return C;
+}
+
 std::uint64_t hashStep(std::uint64_t H, std::uint8_t B) {
     H ^= static_cast<std::uint64_t>(B);
     H *= 0xff51afd7ed558ccdULL;
@@ -149,6 +161,9 @@ std::vector<Target> collectTargets(Function &F) {
                 }
             } else if (auto *SI = dyn_cast<StoreInst>(&I)) {
                 if (auto *C = eligibleStoreValue(*SI))
+                    Targets.push_back({&I, 0, C});
+            } else if (auto *BI = dyn_cast<BranchInst>(&I)) {
+                if (auto *C = eligibleBranchCondition(*BI))
                     Targets.push_back({&I, 0, C});
             } else {
                 if (!isRewritableUser(I))

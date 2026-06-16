@@ -61,6 +61,15 @@ ConstantInt *eligibleStoreValue(StoreInst &SI) {
     return C;
 }
 
+ConstantInt *eligibleBranchCondition(BranchInst &BI) {
+    if (!BI.isConditional())
+        return nullptr;
+    auto *C = dyn_cast<ConstantInt>(BI.getCondition());
+    if (!C || !eligibleWidth(C->getType()->getIntegerBitWidth()))
+        return nullptr;
+    return C;
+}
+
 std::uint8_t lagrangeBasisAtZero(ArrayRef<core::shamir::Share> Shares,
                                  std::size_t J) {
     const std::uint8_t Xj = Shares[J].first;
@@ -252,6 +261,9 @@ bool shamirShareFunction(Function &F, const ShamirShareParams &Params,
                 }
             } else if (auto *SI = dyn_cast<StoreInst>(&I)) {
                 if (auto *C = eligibleStoreValue(*SI))
+                    Targets.push_back({&I, 0, C});
+            } else if (auto *BI = dyn_cast<BranchInst>(&I)) {
+                if (auto *C = eligibleBranchCondition(*BI))
                     Targets.push_back({&I, 0, C});
             } else {
                 if (!isRewritableUser(I))
