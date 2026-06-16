@@ -4,9 +4,9 @@
 //
 // morok/passes/FunctionWrapper.cpp
 //
-// Only ordinary direct calls are wrapped: variadic callees, intrinsics, inline
-// asm, operand-bundle calls, and `musttail` calls are left alone, so the
-// forwarder always has a well-defined, type-identical signature.
+// Direct calls and invokes are wrapped: variadic callees, intrinsics, inline
+// asm, operand-bundle call sites, `callbr`, and `musttail` calls are left alone,
+// so the forwarder always has a well-defined, type-identical signature.
 
 #include "morok/passes/FunctionWrapper.hpp"
 
@@ -28,12 +28,15 @@ namespace {
 
 constexpr std::uint32_t kMaxWrappersPerModule = 256;
 
-bool wrappable(CallInst *ci) {
-    if (ci->isInlineAsm() || ci->hasOperandBundles())
+bool wrappable(CallBase *cb) {
+    if (!isa<CallInst>(cb) && !isa<InvokeInst>(cb))
         return false;
-    if (ci->isMustTailCall())
+    if (cb->isInlineAsm() || cb->hasOperandBundles())
         return false;
-    Function *callee = ci->getCalledFunction();
+    if (auto *ci = dyn_cast<CallInst>(cb))
+        if (ci->isMustTailCall())
+            return false;
+    Function *callee = cb->getCalledFunction();
     if (!callee || callee->isIntrinsic() || callee->isVarArg())
         return false;
     if (callee->getName().starts_with("morok."))
@@ -87,7 +90,7 @@ bool functionWrapModule(Module &M, const FuncWrapParams &params,
         if (wrappers >= MaxWrappers)
             return changed;
         const std::uint32_t Remaining = MaxWrappers - wrappers;
-        std::vector<CallInst *> targets;
+        std::vector<CallBase *> targets;
         targets.reserve(Remaining);
         for (Function &F : M) {
             if (targets.size() >= Remaining)
@@ -97,16 +100,16 @@ bool functionWrapModule(Module &M, const FuncWrapParams &params,
             for (Instruction &inst : instructions(F)) {
                 if (targets.size() >= Remaining)
                     break;
-                if (auto *ci = dyn_cast<CallInst>(&inst))
-                    if (wrappable(ci))
+                if (auto *cb = dyn_cast<CallBase>(&inst))
+                    if (wrappable(cb))
                         if (rng.chance(params.probability))
-                            targets.push_back(ci);
+                            targets.push_back(cb);
             }
         }
 
-        for (CallInst *ci : targets) {
-            Function *forwarder = makeForwarder(M, ci->getCalledFunction());
-            ci->setCalledFunction(forwarder);
+        for (CallBase *cb : targets) {
+            Function *forwarder = makeForwarder(M, cb->getCalledFunction());
+            cb->setCalledFunction(forwarder);
             ++wrappers;
             changed = true;
         }

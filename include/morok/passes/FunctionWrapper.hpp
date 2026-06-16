@@ -4,12 +4,12 @@
 //
 // morok/passes/FunctionWrapper.hpp — call-site proxying.
 //
-// Replaces direct calls with calls to freshly-generated forwarder functions
-// that simply tail through to the original callee.  This adds a layer of
-// indirection at every wrapped call site (and, with multiple passes, distinct
-// proxies for identical calls), frustrating call-graph reconstruction.  It is
-// value-neutral by construction: the forwarder passes its arguments through
-// unchanged.
+// Replaces direct calls and invokes with call/invoke sites targeting
+// freshly-generated forwarder functions that simply tail through to the
+// original callee.  This adds a layer of indirection at every wrapped site (and,
+// with multiple passes, distinct proxies for identical callees), frustrating
+// call-graph reconstruction.  It is value-neutral by construction: the
+// forwarder passes its arguments through unchanged.
 
 #ifndef MOROK_PASSES_FUNCTION_WRAPPER_HPP
 #define MOROK_PASSES_FUNCTION_WRAPPER_HPP
@@ -28,12 +28,13 @@ class Module;
 namespace morok::passes {
 
 struct FuncWrapParams {
-    std::uint32_t probability = 50;   ///< per-call-site chance, 0..100
+    std::uint32_t probability = 50;   ///< per call/invoke-site chance, 0..100
     std::uint32_t times = 1;          ///< wrapping rounds (nested proxies)
     std::uint32_t max_wrappers = 256; ///< total generated forwarder cap
 };
 
-/// Wrap eligible call sites in `M`.  Returns true if any call was redirected.
+/// Wrap eligible call/invoke sites in `M`.  Returns true if any site was
+/// redirected.
 bool functionWrapModule(llvm::Module &M, const FuncWrapParams &params,
                         morok::ir::IRRandom &rng);
 

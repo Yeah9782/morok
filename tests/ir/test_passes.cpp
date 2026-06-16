@@ -7019,6 +7019,58 @@ define i32 @caller(i32 %x) {
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("functionWrapModule proxies an invoke and preserves EH edges") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+declare i32 @may_throw(i32)
+declare i32 @__gxx_personality_v0(...)
+
+define i32 @caller(i32 %x) personality ptr @__gxx_personality_v0 {
+entry:
+  %r = invoke i32 @may_throw(i32 %x)
+          to label %ok unwind label %lpad
+ok:
+  ret i32 %r
+lpad:
+  %lp = landingpad { ptr, i32 }
+          cleanup
+  ret i32 -1
+}
+)ir");
+    Function *F = M->getFunction("caller");
+    REQUIRE(F);
+    BasicBlock *Ok = nullptr;
+    BasicBlock *LPad = nullptr;
+    for (BasicBlock &BB : *F) {
+        if (BB.getName() == "ok")
+            Ok = &BB;
+        if (BB.getName() == "lpad")
+            LPad = &BB;
+    }
+    REQUIRE(Ok);
+    REQUIRE(LPad);
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(252);
+    morok::ir::IRRandom rng(engine);
+    CHECK(morok::passes::functionWrapModule(*M, {/*prob=*/100, /*times=*/1},
+                                            rng));
+
+    InvokeInst *WrappedInvoke = nullptr;
+    for (Instruction &I : instructions(*F))
+        if (auto *II = dyn_cast<InvokeInst>(&I))
+            WrappedInvoke = II;
+
+    REQUIRE(WrappedInvoke);
+    REQUIRE(WrappedInvoke->getCalledFunction());
+    CHECK(WrappedInvoke->getCalledFunction()->getName().starts_with(
+        "morok.wrap"));
+    CHECK(WrappedInvoke->getNormalDest() == Ok);
+    CHECK(WrappedInvoke->getUnwindDest() == LPad);
+    CHECK(countFunctions(*M, "morok.wrap") == 1u);
+    CHECK(countCallsTo(*F, "may_throw") == 0u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("functionWrapModule caps generated forwarders") {
     LLVMContext ctx;
     auto M = std::make_unique<Module>("wrap-cap", ctx);
