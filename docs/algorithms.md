@@ -360,13 +360,16 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   CFG rather than exposing a late BCF signature.
 
 ## Optimizer amplification — IR structure
-- Eligible operations are unflagged scalar integer `add/sub/mul/and/or/xor`
-  binary operators, scalar integer `icmp` predicates from `i1` upward, and
-  unflagged scalar floating `fcmp` predicates over `half`, `bfloat`, `float`,
-  and `double`.  The pass skips poison-generating arithmetic flags, fast-math
-  comparison flags, and generated `morok.optamp.*` expressions, because it
-  clones the base operation and cannot legally erase `nuw`/`nsw`/disjoint or
-  `nnan`-style semantics.
+- Eligible operations are scalar integer `add/sub/mul/and/or/xor` binary
+  operators (including `nuw`/`nsw`/`disjoint`-flagged forms), scalar integer
+  `icmp` predicates from `i1` upward, and unflagged scalar floating `fcmp`
+  predicates over `half`, `bfloat`, `float`, and `double`.  Poison-generating
+  arithmetic flags are accepted because the base op is re-emitted *without*
+  them (`morok.optamp.base`) and selected against flag-free equivalent forms —
+  a sound refinement identical for every input the flag promised about.
+  Fast-math `fcmp` flags are still skipped (the compare is reproduced verbatim,
+  so `nnan`-style semantics cannot be safely erased), as are the generated
+  `morok.optamp.*` expressions.
 - Each selected op is cloned as `morok.optamp.base`, then expanded into up to
   `max_forms` mathematically equivalent forms: carry-split addition,
   borrow-split subtraction, De Morgan forms, xor-as-or-minus-and, and wrapping

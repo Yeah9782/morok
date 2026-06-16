@@ -721,24 +721,36 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_CASE("optimizerAmplifyFunction honors probability and skips flags") {
+TEST_CASE("optimizerAmplifyFunction amplifies poison-flagged ops via a "
+          "flag-free base") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
-define i32 @optamp_skip(i32 %a, i32 %b) {
+define i32 @optamp_flagged(i32 %a, i32 %b) {
 entry:
   %sum = add nsw i32 %a, %b
   ret i32 %sum
 }
 )ir");
-    Function *F = M->getFunction("optamp_skip");
+    Function *F = M->getFunction("optamp_flagged");
     REQUIRE(F);
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(14);
     morok::ir::IRRandom rng(engine);
-    CHECK_FALSE(morok::passes::optimizerAmplifyFunction(
+    // `add nsw` used to be skipped; it must now amplify, and the generated base
+    // op must NOT carry nsw/nuw (the replacement is the flag-free refinement).
+    CHECK(morok::passes::optimizerAmplifyFunction(
         *F, {/*probability=*/100, /*max_forms=*/3}, rng));
-    for (Instruction &I : instructions(*F))
-        CHECK_FALSE(I.getName().starts_with("morok.optamp"));
+    bool hasBase = false;
+    for (Instruction &I : instructions(*F)) {
+        if (!I.getName().starts_with("morok.optamp.base"))
+            continue;
+        hasBase = true;
+        if (auto *OBO = dyn_cast<OverflowingBinaryOperator>(&I)) {
+            CHECK_FALSE(OBO->hasNoSignedWrap());
+            CHECK_FALSE(OBO->hasNoUnsignedWrap());
+        }
+    }
+    CHECK(hasBase);
     CHECK_FALSE(verifyModule(*M, &errs()));
 
     auto M2 = parse(ctx, R"ir(

@@ -40,8 +40,10 @@ bool eligible(BinaryOperator *BO) {
         return false;
     if (BO->getName().starts_with("morok.optamp"))
         return false;
-    if (BO->hasPoisonGeneratingFlags())
-        return false;
+    // Poison-generating flags (nsw/nuw, `or disjoint`, …) are accepted: amplify
+    // replaces the op with a select over a flag-free base and flag-free
+    // equivalent forms (see amplify()), a sound refinement of the flagged op —
+    // identical for every input the flag promised about.
 
     switch (BO->getOpcode()) {
     case Instruction::Add:
