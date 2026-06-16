@@ -26,7 +26,7 @@ class Function;
 namespace morok::passes {
 
 struct DataEntangledFlattenParams {
-    std::uint32_t max_terms = 4; ///< live integer values mixed per block
+    std::uint32_t max_terms = 4; ///< live scalar integer/FP values mixed/block
 };
 
 /// Apply data-entangled control-flow flattening to `F`.

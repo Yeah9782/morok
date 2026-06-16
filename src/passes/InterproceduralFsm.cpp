@@ -231,12 +231,32 @@ Value *asI32(IRBuilder<NoFolder> &B, Value *V) {
         if (Bits > 32)
             return B.CreateTrunc(V, I32, "morok.ifsm.term.trunc");
     }
+    if (V->getType()->isHalfTy() || V->getType()->isBFloatTy() ||
+        V->getType()->isFloatTy() || V->getType()->isDoubleTy()) {
+        IntegerType *CarrierTy = nullptr;
+        if (V->getType()->isHalfTy() || V->getType()->isBFloatTy())
+            CarrierTy = IntegerType::get(V->getContext(), 16);
+        else if (V->getType()->isFloatTy())
+            CarrierTy = IntegerType::get(V->getContext(), 32);
+        else
+            CarrierTy = IntegerType::get(V->getContext(), 64);
+        Value *Bits = B.CreateBitCast(V, CarrierTy, "morok.ifsm.term.fp");
+        if (CarrierTy->getBitWidth() < 32)
+            return B.CreateZExt(Bits, I32, "morok.ifsm.term.zext");
+        if (CarrierTy->getBitWidth() > 32)
+            return B.CreateTrunc(Bits, I32, "morok.ifsm.term.trunc");
+        return Bits;
+    }
     return nullptr;
 }
 
 void addTerm(Value *V, SmallPtrSetImpl<Value *> &Seen,
              std::vector<Value *> &Terms) {
-    if (!V || !V->getType()->isIntegerTy())
+    if (!V)
+        return;
+    Type *Ty = V->getType();
+    if (!Ty->isIntegerTy() && !Ty->isHalfTy() && !Ty->isBFloatTy() &&
+        !Ty->isFloatTy() && !Ty->isDoubleTy())
         return;
     if (Seen.insert(V).second)
         Terms.push_back(V);

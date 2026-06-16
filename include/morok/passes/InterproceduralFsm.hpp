@@ -31,7 +31,7 @@ namespace morok::passes {
 struct InterproceduralFsmParams {
     std::uint32_t probability = 100; ///< per state-store chance, 0..100
     std::uint32_t max_sites = 64;    ///< maximum wrapped transition stores
-    std::uint32_t max_terms = 4;     ///< live integer terms mixed into token arg
+    std::uint32_t max_terms = 4;     ///< live scalar integer/FP token terms
 };
 
 /// Wrap flattened dispatcher state updates in shared interprocedural helpers.

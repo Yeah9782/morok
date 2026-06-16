@@ -6,9 +6,10 @@
 //
 // Non-invertible next-state flattening.  The dispatcher switch is keyed by a
 // lossy per-build state encoding.  Each block selects a logical successor id,
-// mixes the previous encoded state and live integer values into a token, routes
-// the token through volatile shadow slots so the runtime value cancels, then
-// hashes the resulting logical target into the encoded state domain.
+// mixes the previous encoded state and live scalar integer/floating-point
+// values into a token, routes the token through volatile shadow slots so the
+// runtime value cancels, then hashes the resulting logical target into the
+// encoded state domain.
 
 #include "morok/passes/NonInvertibleState.hpp"
 
@@ -100,6 +101,21 @@ Value *shadowSlot(IRBuilder<NoFolder> &B, AllocaInst *Shadow, unsigned Index,
         {ConstantInt::get(I32, 0), ConstantInt::get(I32, Index)}, Name);
 }
 
+bool supportedFloatType(Type *Ty) {
+    return Ty->isHalfTy() || Ty->isBFloatTy() || Ty->isFloatTy() ||
+           Ty->isDoubleTy();
+}
+
+IntegerType *integerCarrierFor(Type *Ty) {
+    if (Ty->isHalfTy() || Ty->isBFloatTy())
+        return IntegerType::get(Ty->getContext(), 16);
+    if (Ty->isFloatTy())
+        return IntegerType::get(Ty->getContext(), 32);
+    if (Ty->isDoubleTy())
+        return IntegerType::get(Ty->getContext(), 64);
+    return nullptr;
+}
+
 Value *asI32(IRBuilder<NoFolder> &B, Value *V) {
     auto *I32 = B.getInt32Ty();
     if (V->getType() == I32)
@@ -111,12 +127,23 @@ Value *asI32(IRBuilder<NoFolder> &B, Value *V) {
         if (Bits > 32)
             return B.CreateTrunc(V, I32, "nistate.term.trunc");
     }
+    if (supportedFloatType(V->getType())) {
+        Value *Bits = B.CreateBitCast(V, integerCarrierFor(V->getType()),
+                                      "nistate.term.fp");
+        auto *CarrierTy = cast<IntegerType>(Bits->getType());
+        if (CarrierTy->getBitWidth() < 32)
+            return B.CreateZExt(Bits, I32, "nistate.term.zext");
+        if (CarrierTy->getBitWidth() > 32)
+            return B.CreateTrunc(Bits, I32, "nistate.term.trunc");
+        return Bits;
+    }
     return nullptr;
 }
 
 void addTerm(Value *V, SmallPtrSetImpl<Value *> &Seen,
              std::vector<Value *> &Terms) {
-    if (!V || !V->getType()->isIntegerTy())
+    if (!V ||
+        (!V->getType()->isIntegerTy() && !supportedFloatType(V->getType())))
         return;
     if (Seen.insert(V).second)
         Terms.push_back(V);

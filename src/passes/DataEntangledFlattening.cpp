@@ -7,8 +7,9 @@
 // Data-entangled control-flow flattening.  The dispatcher still receives the
 // true successor id, but each state update is computed as:
 //   selected_successor ^ token ^ token
-// where token is mixed from the previous dispatcher state and live integer
-// program values.  The duplicate token is routed through volatile shadow memory
+// where token is mixed from the previous dispatcher state and live scalar
+// integer/floating-point program values.  The duplicate token is routed through
+// volatile shadow memory
 // so the expression is value-neutral at run time without becoming a trivially
 // foldable SSA identity.
 
@@ -61,6 +62,21 @@ Value *shadowSlot(IRBuilder<> &B, AllocaInst *Shadow, unsigned Index,
                                Name);
 }
 
+bool supportedFloatType(Type *Ty) {
+    return Ty->isHalfTy() || Ty->isBFloatTy() || Ty->isFloatTy() ||
+           Ty->isDoubleTy();
+}
+
+IntegerType *integerCarrierFor(Type *Ty) {
+    if (Ty->isHalfTy() || Ty->isBFloatTy())
+        return IntegerType::get(Ty->getContext(), 16);
+    if (Ty->isFloatTy())
+        return IntegerType::get(Ty->getContext(), 32);
+    if (Ty->isDoubleTy())
+        return IntegerType::get(Ty->getContext(), 64);
+    return nullptr;
+}
+
 Value *asI32(IRBuilder<> &B, Value *V) {
     auto *I32 = B.getInt32Ty();
     if (V->getType() == I32)
@@ -72,12 +88,23 @@ Value *asI32(IRBuilder<> &B, Value *V) {
         if (Bits > 32)
             return B.CreateTrunc(V, I32, "entfla.term.trunc");
     }
+    if (supportedFloatType(V->getType())) {
+        Value *Bits = B.CreateBitCast(V, integerCarrierFor(V->getType()),
+                                      "entfla.term.fp");
+        auto *CarrierTy = cast<IntegerType>(Bits->getType());
+        if (CarrierTy->getBitWidth() < 32)
+            return B.CreateZExt(Bits, I32, "entfla.term.zext");
+        if (CarrierTy->getBitWidth() > 32)
+            return B.CreateTrunc(Bits, I32, "entfla.term.trunc");
+        return Bits;
+    }
     return nullptr;
 }
 
 void addTerm(Value *V, SmallPtrSetImpl<Value *> &Seen,
              std::vector<Value *> &Terms) {
-    if (!V || !V->getType()->isIntegerTy())
+    if (!V ||
+        (!V->getType()->isIntegerTy() && !supportedFloatType(V->getType())))
         return;
     if (Seen.insert(V).second)
         Terms.push_back(V);

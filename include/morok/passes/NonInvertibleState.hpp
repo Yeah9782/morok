@@ -27,7 +27,7 @@ class Function;
 namespace morok::passes {
 
 struct NonInvertibleStateParams {
-    std::uint32_t max_terms = 4; ///< live integer values mixed per block
+    std::uint32_t max_terms = 4; ///< live scalar integer/FP values mixed/block
     std::uint32_t rounds = 3;    ///< lossy hash rounds, clamped to at least 1
 };
 

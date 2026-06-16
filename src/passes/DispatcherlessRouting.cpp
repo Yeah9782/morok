@@ -7,7 +7,8 @@
 // Dispatcherless computed CFG routing.  Instead of building one central switch,
 // this pass rewrites each selected direct branch/switch terminator into a local
 // indirectbr through a shared block-address table.  The selected table index is
-// fused with a previous route-state value and live integer data, then
+// fused with a previous route-state value and live scalar integer/floating-point
+// data, then
 // neutralized via volatile shadow slots so the runtime target remains exact
 // while the slice no longer consists of a plaintext branch condition alone.
 
@@ -145,6 +146,22 @@ Value *asI32(IRBuilder<NoFolder> &B, Value *V) {
         if (Bits > 32)
             return B.CreateTrunc(V, I32, "morok.dlf.term.trunc");
     }
+    if (V->getType()->isHalfTy() || V->getType()->isBFloatTy() ||
+        V->getType()->isFloatTy() || V->getType()->isDoubleTy()) {
+        IntegerType *CarrierTy = nullptr;
+        if (V->getType()->isHalfTy() || V->getType()->isBFloatTy())
+            CarrierTy = IntegerType::get(V->getContext(), 16);
+        else if (V->getType()->isFloatTy())
+            CarrierTy = IntegerType::get(V->getContext(), 32);
+        else
+            CarrierTy = IntegerType::get(V->getContext(), 64);
+        Value *Bits = B.CreateBitCast(V, CarrierTy, "morok.dlf.term.fp");
+        if (CarrierTy->getBitWidth() < 32)
+            return B.CreateZExt(Bits, I32, "morok.dlf.term.zext");
+        if (CarrierTy->getBitWidth() > 32)
+            return B.CreateTrunc(Bits, I32, "morok.dlf.term.trunc");
+        return Bits;
+    }
     return nullptr;
 }
 
@@ -152,7 +169,11 @@ void addTerm(Value *V, SmallPtrSetImpl<Value *> &Seen,
              std::vector<Value *> &Terms, std::uint32_t Limit) {
     if (Terms.size() >= Limit)
         return;
-    if (!V || !V->getType()->isIntegerTy())
+    if (!V)
+        return;
+    Type *Ty = V->getType();
+    if (!Ty->isIntegerTy() && !Ty->isHalfTy() && !Ty->isBFloatTy() &&
+        !Ty->isFloatTy() && !Ty->isDoubleTy())
         return;
     if (Seen.insert(V).second)
         Terms.push_back(V);

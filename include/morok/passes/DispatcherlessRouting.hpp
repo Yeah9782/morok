@@ -28,7 +28,7 @@ namespace morok::passes {
 struct DispatcherlessRoutingParams {
     std::uint32_t probability = 50; ///< per terminator chance, 0..100
     std::uint32_t max_routes = 32;  ///< per-function transformed edge sites
-    std::uint32_t max_terms = 4;    ///< live integer terms mixed into the token
+    std::uint32_t max_terms = 4;    ///< live scalar integer/FP token terms
 };
 
 /// Replace eligible branch/switch terminators in `F` with computed indirectbrs.

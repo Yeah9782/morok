@@ -80,8 +80,8 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 - The pass reuses the standard switch dispatcher, but replaces direct
   `state = successor_id` stores with `successor_id ^ token ^ token`.  `token`
   is mixed from the previous dispatcher state, the current block id, branch
-  guards, and up to `max_terms` live integer-producing instructions from the
-  block being rewritten.
+  guards, and up to `max_terms` live scalar integer/FP-producing instructions
+  from the block being rewritten.
 - The duplicate token is stored to two volatile slots in an `alloca [2 x i32]`
   named `entfla.shadow`, then reloaded and xored together.  Runtime semantics
   are unchanged because both slots receive the same token, while optimizer and
@@ -98,9 +98,10 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   logical ids out of the dispatcher state domain and only stores encoded ids.
 - Each rewritten terminator selects a logical successor id, mixes the previous
   encoded state, the current logical block id, branch guards, and up to
-  `max_terms` live integer values into `nistate.token`, then stores/reloads that
-  token through two volatile `nistate.shadow` slots.  The volatile xor cancels to
-  zero at runtime but keeps the data dependency in the slice.
+  `max_terms` live scalar integer/FP values into `nistate.token`, then
+  stores/reloads that token through two volatile `nistate.shadow` slots.  The
+  volatile xor cancels to zero at runtime but keeps the data dependency in the
+  slice.
 - The actual store is `nistate.next = H(logical_successor ^ volatile_zero)`,
   where `H` is emitted as several keyed rounds of 64-bit multiply high/low
   folding and an explicit 31-bit mask.  The mask makes the map non-injective in
@@ -140,8 +141,11 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 - The helper signature is `i32(i32 current, i32 proposed, i32 token, ptr thread,
   i32 phase)`.  `current`, the proposed next state, and a live-data token are
   threaded through arguments; `thread` is a private volatile global
-  `morok.ifsm.thread`.  Helper A calls helper B at phase 0, helper B calls
-  helper A at phase 0, and phase 1 returns after unmasking the state.
+  `morok.ifsm.thread`.  The token mixes live scalar integer and FP terms visible
+  before the transition store; FP terms (`half`, `bfloat`, `float`, `double`)
+  are bitcast to equal-width integer carriers and reduced to i32.  Helper A
+  calls helper B at phase 0, helper B calls helper A at phase 0, and phase 1
+  returns after unmasking the state.
 - Runtime semantics are identity: the helper returns `proposed`.  The returned
   value is deliberately reached through one bounded mutual-recursion step,
   volatile global load/store, current-state masking, and token cancellation, so a
@@ -159,8 +163,9 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 - The table index is the original selected successor id xored with a volatile
   zero term.  That zero term is built from two volatile shadow loads after
   storing the same token to `morok.dlf.shadow[0/1]`; the token is mixed from the
-  previous `morok.dlf.state` and up to `max_terms` live integer values from the
-  source block.
+  previous `morok.dlf.state` and up to `max_terms` live scalar integer/FP
+  values from the source block.  FP terms use the same equal-width integer
+  bitcast and i32 reduction as the flattened state-token passes.
 - Route selection has hard standalone ceilings of 32 route sites, 8 mixed live
   terms per site, and 32 successors per site.  Larger functions are partially
   routed, and very large switches are left direct.
@@ -837,10 +842,10 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 - BogusControlFlow: opaque hardware-predicate edges; `bcf_prob`/loop/complexity/entropy_chain/junk_asm.
 - NonInvertibleState: encoded-state flattening with lossy keyed next-state hash.
 - StateOpaquePredicates: MBA opaque guards over flattened dispatcher state plus scalar integer/FP terms.
-- InterproceduralFsm: flattened state stores call mutually-recursive transition helpers.
-- DataEntangledFlattening: switch dispatcher with live-data/previous-state transition tokens.
+- InterproceduralFsm: flattened state stores call mutually-recursive transition helpers with scalar integer/FP token terms.
+- DataEntangledFlattening: switch dispatcher with scalar integer/FP live-data/previous-state transition tokens.
 - ChaosStateMachine: switch dispatcher driven by logistic or single-cycle T-function state maps.
-- DispatcherlessRouting: per-block state-entangled indirectbrs through blockaddress tables.
+- DispatcherlessRouting: per-block state-entangled indirectbrs through blockaddress tables with scalar integer/FP route tokens.
 - MicrocodeStress: oversized blockaddress tables plus aliased decoy destinations that always rejoin.
 - Flattening: classic CFF; runs only when NiState/EntFla/CSM skipped.
 - SplitBasicBlocks: split + stack-confusion; `split_num`, stack_confusion.

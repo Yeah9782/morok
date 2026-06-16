@@ -3348,6 +3348,48 @@ join:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("dataEntangledFlattenFunction mixes floating live terms") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @entangled_fp(float %a, double %b, i1 %flag) {
+entry:
+  br i1 %flag, label %left, label %right
+left:
+  %b32 = fptrunc double %b to float
+  %sum = fadd float %a, %b32
+  %cmp = fcmp ogt float %sum, %a
+  br i1 %cmp, label %done, label %right
+right:
+  ret i32 0
+done:
+  ret i32 1
+}
+)ir");
+    Function *F = M->getFunction("entangled_fp");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(711);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::dataEntangledFlattenFunction(*F, {/*max_terms=*/8},
+                                                      rng));
+
+    bool hasFpTerm = false;
+    bool hasTokenMix = false;
+    for (Instruction &I : instructions(*F)) {
+        if (auto *BC = dyn_cast<BitCastInst>(&I))
+            hasFpTerm |= BC->getName().starts_with("entfla.term.fp") &&
+                         (BC->getSrcTy()->isFloatTy() ||
+                          BC->getSrcTy()->isDoubleTy()) &&
+                         BC->getDestTy()->isIntegerTy();
+        hasTokenMix |= I.getName().starts_with("entfla.token.mix");
+    }
+
+    CHECK(hasFpTerm);
+    CHECK(hasTokenMix);
+    CHECK(countNamedAllocas(*F, "entfla.shadow") == 1u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("dataEntangledFlattenFunction skips single-block functions") {
     LLVMContext ctx;
     auto M = parse(ctx, kArith);
@@ -3459,6 +3501,51 @@ done:
     CHECK_FALSE(rawTargets.empty());
     CHECK_FALSE(rawStateLeakedAsCase);
     CHECK(volatileAccesses >= 4u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("nonInvertibleStateFunction mixes floating live terms") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @noninv_fp(float %a, double %b, i1 %flag) {
+entry:
+  br i1 %flag, label %left, label %right
+left:
+  %b32 = fptrunc double %b to float
+  %sum = fadd float %a, %b32
+  %cmp = fcmp ole float %sum, %a
+  br i1 %cmp, label %done, label %right
+right:
+  ret i32 0
+done:
+  ret i32 1
+}
+)ir");
+    Function *F = M->getFunction("noninv_fp");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(1111);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::nonInvertibleStateFunction(
+        *F, {/*max_terms=*/8, /*rounds=*/3}, rng));
+
+    bool hasFpTerm = false;
+    bool hasTokenMix = false;
+    bool hasHashInput = false;
+    for (Instruction &I : instructions(*F)) {
+        if (auto *BC = dyn_cast<BitCastInst>(&I))
+            hasFpTerm |= BC->getName().starts_with("nistate.term.fp") &&
+                         (BC->getSrcTy()->isFloatTy() ||
+                          BC->getSrcTy()->isDoubleTy()) &&
+                         BC->getDestTy()->isIntegerTy();
+        hasTokenMix |= I.getName().starts_with("nistate.token.mix");
+        hasHashInput |= I.getName().starts_with("nistate.hash.input");
+    }
+
+    CHECK(hasFpTerm);
+    CHECK(hasTokenMix);
+    CHECK(hasHashInput);
+    CHECK(countNamedAllocas(*F, "nistate.shadow") == 1u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
@@ -3607,6 +3694,59 @@ b:
     CHECK_FALSE(morok::passes::stateOpaquePredicatesFunction(
         *F, {/*probability=*/0, /*max_blocks=*/8, /*max_terms=*/4}, rng));
     CHECK(countNamedAllocas(*F, "morok.stateop.shadow") == 0u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("interproceduralFsmSplitModule mixes floating live terms") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @ifsm_fp(float %a, double %b, i1 %flag) {
+entry:
+  %fla.state = alloca i32, align 4
+  store i32 0, ptr %fla.state, align 4
+  br i1 %flag, label %body, label %done
+body:
+  %b32 = fptrunc double %b to float
+  %sum = fadd float %a, %b32
+  %cmp = fcmp ogt float %sum, %a
+  %next = select i1 %cmp, i32 11, i32 13
+  store i32 %next, ptr %fla.state, align 4
+  br label %done
+done:
+  %cur = load i32, ptr %fla.state, align 4
+  ret i32 %cur
+}
+)ir");
+    Function *F = M->getFunction("ifsm_fp");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(1211);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::interproceduralFsmSplitModule(
+        *M, {/*probability=*/100, /*max_sites=*/4, /*max_terms=*/8}, rng));
+
+    bool hasFpTerm = false;
+    bool hasTokenMix = false;
+    bool hasWrappedStore = false;
+    for (Instruction &I : instructions(*F)) {
+        if (auto *BC = dyn_cast<BitCastInst>(&I))
+            hasFpTerm |= BC->getName().starts_with("morok.ifsm.term.fp") &&
+                         (BC->getSrcTy()->isFloatTy() ||
+                          BC->getSrcTy()->isDoubleTy()) &&
+                         BC->getDestTy()->isIntegerTy();
+        hasTokenMix |= I.getName().starts_with("morok.ifsm.token.mix");
+        if (auto *SI = dyn_cast<StoreInst>(&I)) {
+            auto *CI = dyn_cast<CallInst>(SI->getValueOperand());
+            hasWrappedStore |=
+                CI && CI->getCalledFunction() &&
+                CI->getCalledFunction()->getName().starts_with("morok.ifsm.");
+        }
+    }
+
+    CHECK(hasFpTerm);
+    CHECK(hasTokenMix);
+    CHECK(hasWrappedStore);
+    CHECK(M->getFunction("morok.ifsm.step.a") != nullptr);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
@@ -6027,6 +6167,53 @@ done:
     CHECK(hasToken);
     CHECK(hasNext);
     CHECK(hasVolatileLoad);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("dispatcherlessRoutingFunction mixes floating live terms") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @threaded_fp(float %a, double %b, i1 %flag) {
+entry:
+  br i1 %flag, label %body, label %alt
+body:
+  %b32 = fptrunc double %b to float
+  %sum = fadd float %a, %b32
+  %cmp = fcmp olt float %sum, %a
+  br i1 %cmp, label %left, label %right
+left:
+  ret i32 1
+right:
+  ret i32 2
+alt:
+  ret i32 0
+}
+)ir");
+    Function *F = M->getFunction("threaded_fp");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(1011);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::dispatcherlessRoutingFunction(
+        *F, {/*probability=*/100, /*max_routes=*/8, /*max_terms=*/8}, rng));
+
+    bool hasFpTerm = false;
+    bool hasTokenMix = false;
+    bool hasIndirect = false;
+    for (Instruction &I : instructions(*F)) {
+        if (auto *BC = dyn_cast<BitCastInst>(&I))
+            hasFpTerm |= BC->getName().starts_with("morok.dlf.term.fp") &&
+                         (BC->getSrcTy()->isFloatTy() ||
+                          BC->getSrcTy()->isDoubleTy()) &&
+                         BC->getDestTy()->isIntegerTy();
+        hasTokenMix |= I.getName().starts_with("morok.dlf.token.mix");
+        hasIndirect |= isa<IndirectBrInst>(&I);
+    }
+
+    CHECK(hasFpTerm);
+    CHECK(hasTokenMix);
+    CHECK(hasIndirect);
+    CHECK(M->getGlobalVariable("morok.dlf.table", true) != nullptr);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
