@@ -26,9 +26,9 @@ struct DataFlowIntegrityParams {
     std::uint32_t region_bytes = 32;   ///< bytes hashed by the runtime stub
 };
 
-/// Replace selected i1..i8 operations/comparisons with lookup tables decoded
-/// from a runtime integrity hash.  Tampering with the hashed region poisons
-/// table data.
+/// Replace selected i1..i8 operations/constant shifts/comparisons with lookup
+/// tables decoded from a runtime integrity hash.  Tampering with the hashed
+/// region poisons table data.
 bool dataFlowIntegrityFunction(llvm::Function &F,
                                const DataFlowIntegrityParams &params,
                                morok::ir::IRRandom &rng);

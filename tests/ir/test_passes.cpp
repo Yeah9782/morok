@@ -270,6 +270,28 @@ bool hasPlainNarrowArithmetic(Function &F) {
     return false;
 }
 
+bool hasPlainNarrowShift(Function &F) {
+    for (Instruction &I : instructions(F)) {
+        if (I.getName().starts_with("morok."))
+            continue;
+        auto *BO = dyn_cast<BinaryOperator>(&I);
+        if (!BO)
+            continue;
+        auto *Ty = dyn_cast<IntegerType>(BO->getType());
+        if (!Ty || Ty->getBitWidth() == 0 || Ty->getBitWidth() > 8)
+            continue;
+        switch (BO->getOpcode()) {
+        case Instruction::Shl:
+        case Instruction::LShr:
+        case Instruction::AShr:
+            return true;
+        default:
+            break;
+        }
+    }
+    return false;
+}
+
 bool hasPlainNarrowICmp(Function &F) {
     for (Instruction &I : instructions(F)) {
         if (I.getName().starts_with("morok."))
@@ -3059,6 +3081,65 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("tableArithmeticFunction lowers constant narrow shifts to tables") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i8 @shift8(i8 %a) {
+entry:
+  %x = shl i8 %a, 3
+  %y = lshr i8 %x, 1
+  %z = ashr i8 %y, 2
+  ret i8 %z
+}
+
+define i4 @shift4(i4 %a) {
+entry:
+  %x = ashr i4 %a, 1
+  ret i4 %x
+}
+)ir");
+    Function *Shift8 = M->getFunction("shift8");
+    Function *Shift4 = M->getFunction("shift4");
+    REQUIRE(Shift8);
+    REQUIRE(Shift4);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(813);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::tableArithmeticFunction(
+        *Shift8, {/*probability=*/100, /*max_tables=*/3}, rng));
+    CHECK(morok::passes::tableArithmeticFunction(
+        *Shift4, {/*probability=*/100, /*max_tables=*/1}, rng));
+
+    CHECK(countGlobals(*M, "morok.tablearith.table") == 4u);
+    CHECK_FALSE(hasPlainNarrowShift(*Shift8));
+    CHECK_FALSE(hasPlainNarrowShift(*Shift4));
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("tableArithmeticFunction skips unsafe narrow shifts") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i8 @bad_shifts(i8 %a, i8 %s) {
+entry:
+  %var = shl i8 %a, %s
+  %wide = lshr i8 %var, 8
+  %exact = ashr exact i8 %wide, 1
+  %flagged = shl nuw i8 %exact, 1
+  ret i8 %flagged
+}
+)ir");
+    Function *F = M->getFunction("bad_shifts");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(814);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK_FALSE(morok::passes::tableArithmeticFunction(
+        *F, {/*probability=*/100, /*max_tables=*/8}, rng));
+    CHECK(hasPlainNarrowShift(*F));
+    CHECK(countGlobals(*M, "morok.tablearith.table") == 0u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("tableArithmeticFunction honors zero probability") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
@@ -3264,6 +3345,44 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("dataFlowIntegrityFunction supports constant narrow shifts") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i8 @dfi_shift8(i8 %a) {
+entry:
+  %x = shl i8 %a, 2
+  %y = ashr i8 %x, 1
+  ret i8 %y
+}
+
+define i4 @dfi_shift4(i4 %a) {
+entry:
+  %x = lshr i4 %a, 1
+  ret i4 %x
+}
+)ir");
+    Function *Shift8 = M->getFunction("dfi_shift8");
+    Function *Shift4 = M->getFunction("dfi_shift4");
+    REQUIRE(Shift8);
+    REQUIRE(Shift4);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(843);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::dataFlowIntegrityFunction(
+        *Shift8, {/*probability=*/100, /*max_tables=*/2, /*region_bytes=*/32},
+        rng));
+    CHECK(morok::passes::dataFlowIntegrityFunction(
+        *Shift4, {/*probability=*/100, /*max_tables=*/1, /*region_bytes=*/32},
+        rng));
+
+    CHECK(countGlobals(*M, "morok.dfi.table") == 3u);
+    CHECK(countGlobals(*M, "morok.dfi.region") == 2u);
+    CHECK(countGlobals(*M, "morok.dfi.expected") == 2u);
+    CHECK_FALSE(hasPlainNarrowShift(*Shift8));
+    CHECK_FALSE(hasPlainNarrowShift(*Shift4));
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("dataFlowIntegrityFunction honors zero probability") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
@@ -3373,6 +3492,31 @@ entry:
 
     CHECK(countGlobals(*M, "morok.tablearith.table") == 1u);
     CHECK_FALSE(hasPlainNarrowICmp(*F));
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("uniformPrimitiveLowerFunction table-lowers constant shifts") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i8 @uniform_shift(i8 %a) {
+entry:
+  %x = lshr i8 %a, 3
+  ret i8 %x
+}
+)ir");
+    Function *F = M->getFunction("uniform_shift");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(143);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::uniformPrimitiveLowerFunction(
+        *F,
+        {/*op_probability=*/100, /*branch_probability=*/0,
+         /*max_tables=*/1, /*max_branches=*/0},
+        rng));
+
+    CHECK(countGlobals(*M, "morok.tablearith.table") == 1u);
+    CHECK_FALSE(hasPlainNarrowShift(*F));
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 

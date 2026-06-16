@@ -4,10 +4,10 @@
 //
 // morok/passes/UniformPrimitiveLowering.hpp — uniform primitive lowering.
 //
-// Lowers selected i1..i8 operations/comparisons to encrypted table loads and
-// selected branch/switch terminators to block-address table loads feeding
-// indirectbr.  This IR-level layer approximates the roadmap's MOV-only-style
-// uniformity without relying on target-specific MIR.
+// Lowers selected i1..i8 operations/constant shifts/comparisons to encrypted
+// table loads and selected branch/switch terminators to block-address table
+// loads feeding indirectbr.  This IR-level layer approximates the roadmap's
+// MOV-only-style uniformity without relying on target-specific MIR.
 
 #ifndef MOROK_PASSES_UNIFORM_PRIMITIVE_LOWERING_HPP
 #define MOROK_PASSES_UNIFORM_PRIMITIVE_LOWERING_HPP

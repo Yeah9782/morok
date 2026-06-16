@@ -83,10 +83,18 @@ bool supportedOpcode(unsigned Opcode) {
     case Instruction::And:
     case Instruction::Or:
     case Instruction::Xor:
+    case Instruction::Shl:
+    case Instruction::LShr:
+    case Instruction::AShr:
         return true;
     default:
         return false;
     }
+}
+
+bool shiftOpcode(unsigned Opcode) {
+    return Opcode == Instruction::Shl || Opcode == Instruction::LShr ||
+           Opcode == Instruction::AShr;
 }
 
 bool supportedPredicate(CmpInst::Predicate Pred) {
@@ -113,6 +121,19 @@ bool eligible(BinaryOperator &BO) {
         return false;
     if (!supportedOpcode(BO.getOpcode()))
         return false;
+    if (shiftOpcode(BO.getOpcode())) {
+        auto *Shift = dyn_cast<ConstantInt>(BO.getOperand(1));
+        if (!Shift || Shift->getZExtValue() >= Ty->getBitWidth())
+            return false;
+        if (BO.getOpcode() == Instruction::Shl &&
+            (BO.hasNoSignedWrap() || BO.hasNoUnsignedWrap()))
+            return false;
+        if ((BO.getOpcode() == Instruction::LShr ||
+             BO.getOpcode() == Instruction::AShr) &&
+            BO.isExact())
+            return false;
+        return true;
+    }
     if ((BO.getOpcode() == Instruction::Add ||
          BO.getOpcode() == Instruction::Sub ||
          BO.getOpcode() == Instruction::Mul) &&
@@ -169,6 +190,26 @@ std::uint8_t eval(unsigned Opcode, std::uint8_t Lhs, std::uint8_t Rhs,
     case Instruction::Xor:
         Result = static_cast<std::uint8_t>(Lhs ^ Rhs);
         break;
+    case Instruction::Shl: {
+        const unsigned Shift = Rhs & Mask;
+        Result = Shift >= Width ? 0u
+                                : static_cast<std::uint8_t>(Lhs << Shift);
+        break;
+    }
+    case Instruction::LShr: {
+        const unsigned Shift = Rhs & Mask;
+        Result = Shift >= Width ? 0u
+                                : static_cast<std::uint8_t>(Lhs >> Shift);
+        break;
+    }
+    case Instruction::AShr: {
+        const unsigned Shift = Rhs & Mask;
+        Result = Shift >= Width
+                     ? 0u
+                     : static_cast<std::uint8_t>(signExtend(Lhs, Width) >>
+                                                 Shift);
+        break;
+    }
     default:
         break;
     }

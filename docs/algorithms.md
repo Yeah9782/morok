@@ -368,10 +368,12 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 
 ## Table arithmetic — IR structure
 - Eligible operations are wrapping scalar `i1` through `i8`
-  `add/sub/mul/and/or/xor` binary operators plus scalar integer `icmp`
-  predicates over same-width `i1` through `i8` operands.  `nuw`/`nsw`
-  arithmetic is skipped because replacing a potentially poison-producing
-  operation with a total table load would change LLVM semantics.
+  `add/sub/mul/and/or/xor` binary operators, constant `shl/lshr/ashr` with
+  shift amount less than the type width, plus scalar integer `icmp` predicates
+  over same-width `i1` through `i8` operands.  `nuw`/`nsw` arithmetic, `exact`
+  shifts, variable shifts, and out-of-range constant shifts are skipped because
+  replacing a potentially poison-producing operation with a total table load
+  would change LLVM semantics.
 - Each selected operator or comparison gets a private mutable `[65536 x i8]`
   table indexed as `(zext(lhs) << 8) | zext(rhs)`.  Sub-byte operands are
   zero-extended for the lookup; decoded arithmetic bytes are truncated back to
@@ -391,11 +393,11 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 - This is the IR-level half of the roadmap's IR/MIR item.  It deliberately
   avoids target-specific MOV-only lowering, but pushes visible intent toward a
   small set of uniform primitives: table loads, GEPs, `select`, and `indirectbr`.
-- Selected narrow `i1` through `i8` `add/sub/mul/and/or/xor` operations and
-  integer comparisons reuse the encrypted lazy table materialization from
-  TableArithmetic, governed by `op_probability` and `max_tables`.  This removes
-  opcode/predicate intent from the function body while keeping plaintext truth
-  tables out of static initializers.
+- Selected narrow `i1` through `i8` `add/sub/mul/and/or/xor` operations,
+  constant in-range shifts, and integer comparisons reuse the encrypted lazy
+  table materialization from TableArithmetic, governed by `op_probability` and
+  `max_tables`.  This removes opcode/predicate intent from the function body
+  while keeping plaintext truth tables out of static initializers.
 - Selected direct branches and switches are collected up to `max_branches` with
   a hard ceiling of 16 branch sites and 32 successors per site, then lowered to
   a private per-function `morok.uniform.table` of `blockaddress` entries.
@@ -495,9 +497,9 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 
 ## Data-flow-entangled integrity — IR structure
 - The pass generalizes checksum-fused constants from scalars to live lookup
-  tables.  Selected `i1` through `i8` `a OP b` operations and same-width
-  integer comparisons are replaced by volatile loads from private
-  `morok.dfi.table.*` globals.
+  tables.  Selected `i1` through `i8` `a OP b` operations, in-range constant
+  shifts, and same-width integer comparisons are replaced by volatile loads
+  from private `morok.dfi.table.*` globals.
 - Table entries are encoded with a stream key derived from the expected hash of
   a private `morok.dfi.region.*` byte region.  The runtime helper
   `morok.dfi.hash.*` hashes that region with volatile loads, volatile-loads
