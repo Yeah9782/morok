@@ -163,10 +163,6 @@ std::optional<VmOp> binaryOpcode(BinaryOperator &BO, unsigned Width) {
     return VmOp::AShr;
 }
 
-bool safeNarrowBitwise(VmOp Op) {
-    return Op == VmOp::And || Op == VmOp::Or || Op == VmOp::Xor;
-}
-
 std::optional<VmOp> icmpOpcode(ICmpInst &Cmp, unsigned Width) {
     auto *LhsTy = dyn_cast<IntegerType>(Cmp.getOperand(0)->getType());
     auto *RhsTy = dyn_cast<IntegerType>(Cmp.getOperand(1)->getType());
@@ -212,7 +208,8 @@ std::optional<unsigned> signatureWidth(Function &F) {
         return std::nullopt;
     for (Argument &Arg : F.args()) {
         auto *ArgTy = dyn_cast<IntegerType>(Arg.getType());
-        if (!ArgTy || ArgTy->getBitWidth() != Width)
+        if (!ArgTy || !supportedWidth(ArgTy->getBitWidth()) ||
+            ArgTy->getBitWidth() > Width)
             return std::nullopt;
     }
     return Width;
@@ -269,6 +266,59 @@ materializeOperand(Value *V, Program &P,
     return Reg;
 }
 
+std::optional<std::uint8_t>
+appendRegisterBinary(Program &P, VmOp Op, std::uint8_t L, std::uint8_t R,
+                     std::uint32_t &NextReg,
+                     const VirtualizationParams &Params) {
+    std::uint8_t Dst = 0;
+    if (!newRegister(NextReg, Params, Dst))
+        return std::nullopt;
+    if (!appendInstr(P, VmInstr{Op, Dst, L, R, 0}, Params))
+        return std::nullopt;
+    return Dst;
+}
+
+std::optional<std::uint8_t>
+maskRegister(Program &P, std::uint8_t Reg, unsigned Bits,
+             std::uint32_t &NextReg, const VirtualizationParams &Params) {
+    if (Bits >= P.width)
+        return Reg;
+    auto Mask = materializeImmediate(widthMask(Bits), P, NextReg, Params);
+    if (!Mask)
+        return std::nullopt;
+    std::uint8_t Dst = 0;
+    if (!newRegister(NextReg, Params, Dst))
+        return std::nullopt;
+    if (!appendInstr(P, VmInstr{VmOp::And, Dst, Reg, *Mask, 0}, Params))
+        return std::nullopt;
+    return Dst;
+}
+
+std::optional<std::uint8_t>
+signExtendRegister(Program &P, std::uint8_t Reg, unsigned SrcBits,
+                   std::uint32_t &NextReg,
+                   const VirtualizationParams &Params) {
+    if (SrcBits == P.width)
+        return Reg;
+    if (SrcBits == 0 || SrcBits > P.width)
+        return std::nullopt;
+    auto Shift =
+        materializeImmediate(P.width - SrcBits, P, NextReg, Params);
+    if (!Shift)
+        return std::nullopt;
+    std::uint8_t Shifted = 0;
+    if (!newRegister(NextReg, Params, Shifted))
+        return std::nullopt;
+    if (!appendInstr(P, VmInstr{VmOp::Shl, Shifted, Reg, *Shift, 0}, Params))
+        return std::nullopt;
+    std::uint8_t Dst = 0;
+    if (!newRegister(NextReg, Params, Dst))
+        return std::nullopt;
+    if (!appendInstr(P, VmInstr{VmOp::AShr, Dst, Shifted, *Shift, 0}, Params))
+        return std::nullopt;
+    return Dst;
+}
+
 std::optional<Program> buildProgram(Function &F,
                                     const VirtualizationParams &Params) {
     std::optional<unsigned> Width = signatureWidth(F);
@@ -301,9 +351,8 @@ std::optional<Program> buildProgram(Function &F,
             if (!Op)
                 return std::nullopt;
             const bool SameWidth = BOTy->getBitWidth() == P.width;
-            const bool NarrowBitwise =
-                BOTy->getBitWidth() < P.width && safeNarrowBitwise(*Op);
-            if (!SameWidth && !NarrowBitwise)
+            const bool NarrowOp = BOTy->getBitWidth() < P.width;
+            if (!SameWidth && !NarrowOp)
                 return std::nullopt;
             auto L =
                 materializeOperand(BO->getOperand(0), P, Regs, NextReg, Params);
@@ -311,12 +360,19 @@ std::optional<Program> buildProgram(Function &F,
                 materializeOperand(BO->getOperand(1), P, Regs, NextReg, Params);
             if (!L || !R)
                 return std::nullopt;
-            std::uint8_t Dst = 0;
-            if (!newRegister(NextReg, Params, Dst))
+            if (!SameWidth && *Op == VmOp::AShr) {
+                L = signExtendRegister(P, *L, BOTy->getBitWidth(), NextReg,
+                                       Params);
+                if (!L)
+                    return std::nullopt;
+            }
+            auto Dst = appendRegisterBinary(P, *Op, *L, *R, NextReg, Params);
+            if (!Dst)
                 return std::nullopt;
-            if (!appendInstr(P, VmInstr{*Op, Dst, *L, *R, 0}, Params))
+            Dst = maskRegister(P, *Dst, BOTy->getBitWidth(), NextReg, Params);
+            if (!Dst)
                 return std::nullopt;
-            Regs[&I] = Dst;
+            Regs[&I] = *Dst;
             continue;
         }
 
@@ -324,29 +380,28 @@ std::optional<Program> buildProgram(Function &F,
             auto *DstTy = dyn_cast<IntegerType>(SExt->getType());
             auto *SrcTy = dyn_cast<IntegerType>(SExt->getOperand(0)->getType());
             if (!DstTy || !SrcTy || DstTy->getBitWidth() != P.width ||
-                SrcTy->getBitWidth() != 1)
+                SrcTy->getBitWidth() >= P.width)
                 return std::nullopt;
-            auto Cond =
+            auto R =
                 materializeOperand(SExt->getOperand(0), P, Regs, NextReg,
                                    Params);
-            auto AllOnes =
-                materializeImmediate(widthMask(P.width), P, NextReg, Params);
-            auto Zero = materializeImmediate(0, P, NextReg, Params);
-            if (!Cond || !AllOnes || !Zero)
+            if (!R)
                 return std::nullopt;
-            std::uint8_t Dst = 0;
-            if (!newRegister(NextReg, Params, Dst))
+            R = signExtendRegister(P, *R, SrcTy->getBitWidth(), NextReg,
+                                   Params);
+            if (!R)
                 return std::nullopt;
-            if (!appendInstr(P,
-                             VmInstr{VmOp::Select, Dst, *Cond, *AllOnes, *Zero},
-                             Params))
-                return std::nullopt;
-            Regs[&I] = Dst;
+            Regs[&I] = *R;
             continue;
         }
 
         if (auto *Cmp = dyn_cast<ICmpInst>(&I)) {
-            auto Op = icmpOpcode(*Cmp, P.width);
+            auto *CmpTy =
+                dyn_cast<IntegerType>(Cmp->getOperand(0)->getType());
+            if (!CmpTy || !supportedWidth(CmpTy->getBitWidth()) ||
+                CmpTy->getBitWidth() > P.width)
+                return std::nullopt;
+            auto Op = icmpOpcode(*Cmp, CmpTy->getBitWidth());
             if (!Op)
                 return std::nullopt;
             auto L = materializeOperand(Cmp->getOperand(0), P, Regs, NextReg,
@@ -355,6 +410,14 @@ std::optional<Program> buildProgram(Function &F,
                                         Params);
             if (!L || !R)
                 return std::nullopt;
+            if (Cmp->isSigned() && CmpTy->getBitWidth() < P.width) {
+                L = signExtendRegister(P, *L, CmpTy->getBitWidth(), NextReg,
+                                       Params);
+                R = signExtendRegister(P, *R, CmpTy->getBitWidth(), NextReg,
+                                       Params);
+                if (!L || !R)
+                    return std::nullopt;
+            }
             std::uint8_t Dst = 0;
             if (!newRegister(NextReg, Params, Dst))
                 return std::nullopt;
@@ -372,6 +435,25 @@ std::optional<Program> buildProgram(Function &F,
                 return std::nullopt;
             auto R = materializeOperand(ZExt->getOperand(0), P, Regs, NextReg,
                                         Params);
+            if (!R)
+                return std::nullopt;
+            Regs[&I] = *R;
+            continue;
+        }
+
+        if (auto *Trunc = dyn_cast<TruncInst>(&I)) {
+            auto *DstTy = dyn_cast<IntegerType>(Trunc->getType());
+            auto *SrcTy =
+                dyn_cast<IntegerType>(Trunc->getOperand(0)->getType());
+            if (!DstTy || !SrcTy || !supportedWidth(DstTy->getBitWidth()) ||
+                DstTy->getBitWidth() > P.width ||
+                DstTy->getBitWidth() >= SrcTy->getBitWidth())
+                return std::nullopt;
+            auto R = materializeOperand(Trunc->getOperand(0), P, Regs, NextReg,
+                                        Params);
+            if (!R)
+                return std::nullopt;
+            R = maskRegister(P, *R, DstTy->getBitWidth(), NextReg, Params);
             if (!R)
                 return std::nullopt;
             Regs[&I] = *R;
@@ -857,8 +939,11 @@ Function *buildHelper(Module &M, const Program &P, GlobalVariable *Bytecode,
 
     std::uint32_t ArgIndex = 0;
     for (Argument &Arg : Helper->args()) {
-        Value *Wide = P.width < 64 ? EB.CreateZExt(&Arg, I64, "morok.vm.arg")
-                                   : static_cast<Value *>(&Arg);
+        auto *ArgTy = cast<IntegerType>(Arg.getType());
+        Value *Wide =
+            ArgTy->getBitWidth() < 64
+                ? EB.CreateZExt(&Arg, I64, "morok.vm.arg")
+                : static_cast<Value *>(&Arg);
         Wide = maskToWidth(EB, Wide, P.width);
         storeReg(EB, Regs, RegsTy, ConstantInt::get(I32, ArgIndex), Wide);
         ++ArgIndex;

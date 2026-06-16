@@ -4841,6 +4841,57 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("virtualizeModule lifts mixed-width integer casts and narrow ops") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @vm_mixed_width(i8 %a, i16 %b, i32 %c) {
+entry:
+  %az = zext i8 %a to i32
+  %bs = sext i16 %b to i32
+  %low = trunc i32 %c to i8
+  %n0 = add i8 %a, %low
+  %n1 = mul i8 %n0, 3
+  %n2 = ashr i8 %n1, 2
+  %cmp = icmp slt i8 %n2, %a
+  %nz = zext i8 %n2 to i32
+  %sel = select i1 %cmp, i32 %bs, i32 %az
+  %sum = add i32 %sel, %nz
+  ret i32 %sum
+}
+)ir");
+    Function *F = M->getFunction("vm_mixed_width");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(1552);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::virtualizeModule(
+        *M,
+        {/*probability=*/100, /*max_functions=*/1,
+         /*max_instructions=*/64, /*max_registers=*/96},
+        rng));
+
+    Function *Helper = M->getFunction("morok.vm.vm_mixed_width.exec");
+    REQUIRE(Helper);
+    CHECK(countGlobals(*M, "morok.vm.bytecode") == 1u);
+    CHECK(countGlobals(*M, "morok.vm.targets") == 1u);
+
+    std::size_t wrapperCalls = 0;
+    std::size_t wrapperBinops = 0;
+    std::size_t wrapperCasts = 0;
+    std::size_t wrapperCmps = 0;
+    for (Instruction &I : instructions(*F)) {
+        wrapperCalls += isa<CallInst>(&I) ? 1u : 0u;
+        wrapperBinops += isa<BinaryOperator>(&I) ? 1u : 0u;
+        wrapperCasts += isa<CastInst>(&I) ? 1u : 0u;
+        wrapperCmps += isa<ICmpInst>(&I) ? 1u : 0u;
+    }
+    CHECK(wrapperCalls == 1u);
+    CHECK(wrapperBinops == 0u);
+    CHECK(wrapperCasts == 0u);
+    CHECK(wrapperCmps == 0u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("virtualizeModule lifts one-bit integer functions") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(

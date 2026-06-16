@@ -449,13 +449,15 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 
 ## Virtualization — threaded bytecode VM
 - Selected functions are lifted only when the pass can prove a strict
-  straight-line integer subset: 1- to 64-bit same-width integer arguments/return, one basic
-  block, no calls or memory, unflagged modular arithmetic/bitwise/constant
-  shifts, integer comparisons, and zero-extension of narrower integer results
-  such as `icmp` booleans.  Branchless `select` over a one-bit condition and
-  same-width integer values is also supported, as are narrow boolean
-  `and`/`or`/`xor` predicate compositions and `sext i1` signed-mask idioms.
-  Unsupported IR is left untouched rather than approximated.
+  straight-line integer subset: 1- to 64-bit integer return, integer arguments
+  no wider than the return, one basic block, no calls or memory, unflagged
+  modular arithmetic/bitwise/constant shifts, integer comparisons, and
+  zero/sign-extension or truncation of narrower integer values.  Narrow
+  arithmetic is masked back to its source width; signed narrow compares and
+  `sext` are lowered by sign-extending through VM shifts.  Branchless `select`
+  over a one-bit condition and same-width integer values is also supported, as
+  are narrow boolean `and`/`or`/`xor` predicate compositions.  Unsupported IR is
+  left untouched rather than approximated.
 - The lifted function becomes a native wrapper that calls an internal
   `morok.vm.<function>.exec` helper.  The original computation is encoded as a
   private `morok.vm.bytecode.*` byte array; bytecode fields are first randomized
