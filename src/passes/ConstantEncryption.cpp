@@ -4,14 +4,14 @@
 //
 // morok/passes/ConstantEncryption.cpp
 //
-// Only operands of integer arithmetic, comparison, select, cast, conditional
-// branch/switch conditions, return, store values, and ordinary call-argument
-// instructions are rewritten — never branch destinations, switch cases, GEP
-// indices, store pointers, intrinsic immediate arguments, callees, or operand
-// bundles, which must remain literal — so the output is always valid IR. The
-// XOR-share split is the verified one from morok/core/XorShare.hpp; the shares
-// live in private mutable globals and are read with volatile loads so the
-// reconstruction survives optimisation.
+// Only operands of integer arithmetic, comparison, select, cast, PHI incoming
+// values, conditional branch/switch conditions, return, store values, and
+// ordinary call-argument instructions are rewritten — never branch destinations,
+// switch cases, GEP indices, store pointers, intrinsic immediate arguments,
+// callees, or operand bundles, which must remain literal — so the output is
+// always valid IR. The XOR-share split is the verified one from
+// morok/core/XorShare.hpp; the shares live in private mutable globals and are
+// read with volatile loads so the reconstruction survives optimisation.
 
 #include "morok/passes/ConstantEncryption.hpp"
 
@@ -24,8 +24,10 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/NoFolder.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
 #include <algorithm>
+#include <map>
 #include <vector>
 
 using namespace llvm;
@@ -78,6 +80,18 @@ ConstantInt *eligibleSwitchCondition(SwitchInst &SI) {
     return C;
 }
 
+bool eligiblePhiIncoming(PHINode &PN, unsigned Incoming) {
+    auto *C = dyn_cast<ConstantInt>(PN.getIncomingValue(Incoming));
+    if (!C || !eligibleWidth(C->getType()->getIntegerBitWidth()))
+        return false;
+    BasicBlock *Pred = PN.getIncomingBlock(Incoming);
+    Instruction *Term = Pred ? Pred->getTerminator() : nullptr;
+    if (!Term || Term->getNumSuccessors() == 0)
+        return false;
+    return Term->getNumSuccessors() == 1 || isa<BranchInst>(Term) ||
+           isa<SwitchInst>(Term);
+}
+
 Value *reconstruct(Module &M, Instruction &user, ConstantInt *c,
                    unsigned shareCount, ir::IRRandom &rng) {
     auto *ty = cast<IntegerType>(c->getType());
@@ -114,13 +128,23 @@ bool constantEncryptFunction(Function &F, const ConstEncParams &params,
             Instruction *user;
             unsigned index;
             ConstantInt *value;
+            bool phi_incoming = false;
+            BasicBlock *incoming_block = nullptr;
         };
         std::vector<Target> targets;
         for (BasicBlock &bb : F) {
             for (Instruction &inst : bb) {
                 if (targets.size() >= kMaxConstEncTargetsPerIteration)
                     break;
-                if (auto *CB = dyn_cast<CallBase>(&inst)) {
+                if (auto *PN = dyn_cast<PHINode>(&inst)) {
+                    for (unsigned I = 0; I < PN->getNumIncomingValues(); ++I) {
+                        if (!eligiblePhiIncoming(*PN, I))
+                            continue;
+                        targets.push_back(
+                            {&inst, I, cast<ConstantInt>(PN->getIncomingValue(I)),
+                             true, PN->getIncomingBlock(I)});
+                    }
+                } else if (auto *CB = dyn_cast<CallBase>(&inst)) {
                     if (!safeCallArgs(*CB))
                         continue;
                     for (unsigned I = 0; I < CB->arg_size(); ++I) {
@@ -153,11 +177,55 @@ bool constantEncryptFunction(Function &F, const ConstEncParams &params,
                 break;
         }
 
+        std::map<std::pair<BasicBlock *, BasicBlock *>, BasicBlock *>
+            splitEdges;
+        auto insertionPoint = [&](const Target &T) -> Instruction * {
+            if (!T.phi_incoming)
+                return T.user;
+            auto *PN = cast<PHINode>(T.user);
+            BasicBlock *Succ = PN->getParent();
+            BasicBlock *Pred = T.incoming_block;
+            auto Key = std::make_pair(Pred, Succ);
+            auto It = splitEdges.find(Key);
+            if (It != splitEdges.end())
+                return It->second->getTerminator();
+
+            Instruction *Term = Pred ? Pred->getTerminator() : nullptr;
+            if (!Term)
+                return nullptr;
+            if (Term->getNumSuccessors() == 1)
+                return Term;
+            BasicBlock *Edge =
+                SplitEdge(Pred, Succ, nullptr, nullptr, nullptr,
+                          "morok.const.phi.edge");
+            if (!Edge)
+                return nullptr;
+            splitEdges[Key] = Edge;
+            return Edge->getTerminator();
+        };
+
         for (const Target &t : targets) {
             if (!rng.chance(params.probability))
                 continue;
-            Value *repl = reconstruct(M, *t.user, t.value, shareCount, rng);
-            t.user->setOperand(t.index, repl);
+            Instruction *InsertBefore = insertionPoint(t);
+            if (!InsertBefore)
+                continue;
+            Value *repl =
+                reconstruct(M, *InsertBefore, t.value, shareCount, rng);
+            if (t.phi_incoming) {
+                auto *PN = cast<PHINode>(t.user);
+                BasicBlock *Incoming = t.incoming_block;
+                auto It = splitEdges.find(std::make_pair(Incoming,
+                                                         PN->getParent()));
+                if (It != splitEdges.end())
+                    Incoming = It->second;
+                const int IncomingIndex = PN->getBasicBlockIndex(Incoming);
+                if (IncomingIndex < 0)
+                    continue;
+                PN->setIncomingValue(static_cast<unsigned>(IncomingIndex), repl);
+            } else {
+                t.user->setOperand(t.index, repl);
+            }
             changed = true;
         }
     }

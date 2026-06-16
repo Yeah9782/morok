@@ -1147,6 +1147,43 @@ default:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("constantEncryptFunction rewrites PHI incoming literals") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i8 @const_phi(i1 %flag) {
+entry:
+  br i1 %flag, label %join, label %right
+right:
+  br label %join
+join:
+  %x = phi i8 [ 11, %entry ], [ 29, %right ]
+  ret i8 %x
+}
+)ir");
+    Function *F = M->getFunction("const_phi");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(508);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::constantEncryptFunction(
+        *F, {/*prob=*/100, /*k=*/3, /*iterations=*/1}, rng));
+
+    PHINode *Phi = nullptr;
+    bool hasSplitEdge = false;
+    for (BasicBlock &BB : *F) {
+        hasSplitEdge |= BB.getName().starts_with("morok.const.phi.edge");
+        for (Instruction &I : BB)
+            if (auto *PN = dyn_cast<PHINode>(&I))
+                Phi = PN;
+    }
+    REQUIRE(Phi);
+    for (unsigned I = 0; I < Phi->getNumIncomingValues(); ++I)
+        CHECK_FALSE(isa<ConstantInt>(Phi->getIncomingValue(I)));
+    CHECK(hasSplitEdge);
+    CHECK(countGlobals(*M, "morok.share") == 6u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("constantEncryptFunction caps literal rewrites") {
     LLVMContext ctx;
     auto M = std::make_unique<Module>("const-cap", ctx);
@@ -1482,6 +1519,48 @@ default:
     CHECK(countGlobals(*M, "morok.shamir.share") == 2u);
     CHECK(countGlobals(*M, "morok.shamir.cell") == 2u);
     CHECK(countCallsTo(*F, "morok.gf8mul") == 2u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("shamirShareFunction reconstructs PHI incoming literals") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i8 @shamir_phi(i1 %flag) {
+entry:
+  br i1 %flag, label %join, label %right
+right:
+  br label %join
+join:
+  %x = phi i8 [ 11, %entry ], [ 29, %right ]
+  ret i8 %x
+}
+)ir");
+    Function *F = M->getFunction("shamir_phi");
+    REQUIRE(F);
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(0x5357);
+    morok::ir::IRRandom rng(engine);
+    CHECK(morok::passes::shamirShareFunction(
+        *F,
+        {/*probability=*/100, /*threshold=*/2, /*shares=*/3,
+         /*max_secrets=*/2},
+        rng));
+
+    PHINode *Phi = nullptr;
+    bool hasSplitEdge = false;
+    for (BasicBlock &BB : *F) {
+        hasSplitEdge |= BB.getName().starts_with("morok.shamir.phi.edge");
+        for (Instruction &I : BB)
+            if (auto *PN = dyn_cast<PHINode>(&I))
+                Phi = PN;
+    }
+    REQUIRE(Phi);
+    for (unsigned I = 0; I < Phi->getNumIncomingValues(); ++I)
+        CHECK_FALSE(isa<ConstantInt>(Phi->getIncomingValue(I)));
+    CHECK(hasSplitEdge);
+    CHECK(countGlobals(*M, "morok.shamir.share") == 4u);
+    CHECK(countGlobals(*M, "morok.shamir.cell") == 4u);
+    CHECK(countCallsTo(*F, "morok.gf8mul") == 4u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
@@ -4458,6 +4537,50 @@ default:
     CHECK(countGlobals(*M, "morok.sc.mask") == 1u);
     CHECK(countGlobals(*M, "morok.postlink.sc") == 1u);
     CHECK(M->getFunction("morok.sc.diff.selfcheck_switch") != nullptr);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("selfChecksumConstantsFunction fuses PHI incoming literals") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i8 @selfcheck_phi(i1 %flag) {
+entry:
+  br i1 %flag, label %join, label %right
+right:
+  br label %join
+join:
+  %x = phi i8 [ 11, %entry ], [ 29, %right ]
+  ret i8 %x
+}
+)ir");
+    Function *F = M->getFunction("selfcheck_phi");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(1818);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::selfChecksumConstantsFunction(
+        *F, {/*probability=*/100, /*max_constants=*/2, /*region_bytes=*/32},
+        rng));
+
+    PHINode *Phi = nullptr;
+    bool hasSplitEdge = false;
+    for (BasicBlock &BB : *F) {
+        hasSplitEdge |= BB.getName().starts_with("morok.sc.phi.edge");
+        for (Instruction &I : BB)
+            if (auto *PN = dyn_cast<PHINode>(&I))
+                Phi = PN;
+    }
+    REQUIRE(Phi);
+    for (unsigned I = 0; I < Phi->getNumIncomingValues(); ++I) {
+        CHECK_FALSE(isa<ConstantInt>(Phi->getIncomingValue(I)));
+        CHECK(Phi->getIncomingValue(I)->getName().starts_with("morok.sc.const"));
+    }
+    CHECK(hasSplitEdge);
+    CHECK(countGlobals(*M, "morok.sc.region") == 1u);
+    CHECK(countGlobals(*M, "morok.sc.expected") == 1u);
+    CHECK(countGlobals(*M, "morok.sc.mask") == 2u);
+    CHECK(countGlobals(*M, "morok.postlink.sc") == 1u);
+    CHECK(M->getFunction("morok.sc.diff.selfcheck_phi") != nullptr);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 

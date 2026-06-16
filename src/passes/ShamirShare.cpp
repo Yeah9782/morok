@@ -23,9 +23,11 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/NoFolder.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
 #include <algorithm>
 #include <cstdint>
+#include <map>
 #include <vector>
 
 using namespace llvm;
@@ -75,6 +77,18 @@ ConstantInt *eligibleSwitchCondition(SwitchInst &SI) {
     if (!C || !eligibleWidth(C->getType()->getIntegerBitWidth()))
         return nullptr;
     return C;
+}
+
+bool eligiblePhiIncoming(PHINode &PN, unsigned Incoming) {
+    auto *C = dyn_cast<ConstantInt>(PN.getIncomingValue(Incoming));
+    if (!C || !eligibleWidth(C->getType()->getIntegerBitWidth()))
+        return false;
+    BasicBlock *Pred = PN.getIncomingBlock(Incoming);
+    Instruction *Term = Pred ? Pred->getTerminator() : nullptr;
+    if (!Term || Term->getNumSuccessors() == 0)
+        return false;
+    return Term->getNumSuccessors() == 1 || isa<BranchInst>(Term) ||
+           isa<SwitchInst>(Term);
 }
 
 std::uint8_t lagrangeBasisAtZero(ArrayRef<core::shamir::Share> Shares,
@@ -252,11 +266,21 @@ bool shamirShareFunction(Function &F, const ShamirShareParams &Params,
         Instruction *user = nullptr;
         unsigned index = 0;
         ConstantInt *value = nullptr;
+        bool phi_incoming = false;
+        BasicBlock *incoming_block = nullptr;
     };
     std::vector<Target> Targets;
     for (BasicBlock &BB : F) {
         for (Instruction &I : BB) {
-            if (auto *CB = dyn_cast<CallBase>(&I)) {
+            if (auto *PN = dyn_cast<PHINode>(&I)) {
+                for (unsigned Op = 0; Op < PN->getNumIncomingValues(); ++Op) {
+                    if (!eligiblePhiIncoming(*PN, Op))
+                        continue;
+                    Targets.push_back(
+                        {&I, Op, cast<ConstantInt>(PN->getIncomingValue(Op)),
+                         true, PN->getIncomingBlock(Op)});
+                }
+            } else if (auto *CB = dyn_cast<CallBase>(&I)) {
                 if (!safeCallArgs(*CB))
                     continue;
                 for (unsigned Op = 0; Op < CB->arg_size(); ++Op) {
@@ -293,14 +317,57 @@ bool shamirShareFunction(Function &F, const ShamirShareParams &Params,
 
     bool Changed = false;
     std::uint32_t Count = 0;
+    std::map<std::pair<BasicBlock *, BasicBlock *>, BasicBlock *> SplitEdges;
+    auto insertionPoint = [&](const Target &T) -> Instruction * {
+        if (!T.phi_incoming)
+            return T.user;
+        auto *PN = cast<PHINode>(T.user);
+        BasicBlock *Succ = PN->getParent();
+        BasicBlock *Pred = T.incoming_block;
+        auto Key = std::make_pair(Pred, Succ);
+        auto It = SplitEdges.find(Key);
+        if (It != SplitEdges.end())
+            return It->second->getTerminator();
+
+        Instruction *Term = Pred ? Pred->getTerminator() : nullptr;
+        if (!Term)
+            return nullptr;
+        if (Term->getNumSuccessors() == 1)
+            return Term;
+        BasicBlock *Edge =
+            SplitEdge(Pred, Succ, nullptr, nullptr, nullptr,
+                      "morok.shamir.phi.edge");
+        if (!Edge)
+            return nullptr;
+        SplitEdges[Key] = Edge;
+        return Edge->getTerminator();
+    };
+
     for (const Target &T : Targets) {
         if (Count >= Params.max_secrets)
             break;
         if (!Rng.chance(Params.probability))
             continue;
+        Instruction *InsertBefore = insertionPoint(T);
+        if (!InsertBefore)
+            continue;
         Value *Replacement =
-            reconstructInteger(M, *T.user, T.value, Threshold, Shares, Rng);
-        T.user->setOperand(T.index, Replacement);
+            reconstructInteger(M, *InsertBefore, T.value, Threshold, Shares,
+                               Rng);
+        if (T.phi_incoming) {
+            auto *PN = cast<PHINode>(T.user);
+            BasicBlock *Incoming = T.incoming_block;
+            auto It = SplitEdges.find(std::make_pair(Incoming, PN->getParent()));
+            if (It != SplitEdges.end())
+                Incoming = It->second;
+            const int IncomingIndex = PN->getBasicBlockIndex(Incoming);
+            if (IncomingIndex < 0)
+                continue;
+            PN->setIncomingValue(static_cast<unsigned>(IncomingIndex),
+                                 Replacement);
+        } else {
+            T.user->setOperand(T.index, Replacement);
+        }
         ++Count;
         Changed = true;
     }

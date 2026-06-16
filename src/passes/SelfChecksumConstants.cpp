@@ -24,10 +24,12 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/NoFolder.h"
 #include "llvm/Support/ModRef.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
 #include <algorithm>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -45,6 +47,8 @@ struct Target {
     Instruction *user = nullptr;
     unsigned index = 0;
     ConstantInt *value = nullptr;
+    bool phi_incoming = false;
+    BasicBlock *incoming_block = nullptr;
 };
 
 struct Runtime {
@@ -113,6 +117,21 @@ ConstantInt *eligibleSwitchCondition(SwitchInst &SI) {
     return C;
 }
 
+bool eligiblePhiIncoming(PHINode &PN, unsigned Incoming) {
+    auto *C = dyn_cast<ConstantInt>(PN.getIncomingValue(Incoming));
+    if (!C)
+        return false;
+    auto *Ty = dyn_cast<IntegerType>(C->getType());
+    if (!Ty || !eligibleWidth(Ty->getBitWidth()))
+        return false;
+    BasicBlock *Pred = PN.getIncomingBlock(Incoming);
+    Instruction *Term = Pred ? Pred->getTerminator() : nullptr;
+    if (!Term || Term->getNumSuccessors() == 0)
+        return false;
+    return Term->getNumSuccessors() == 1 || isa<BranchInst>(Term) ||
+           isa<SwitchInst>(Term);
+}
+
 std::uint64_t hashStep(std::uint64_t H, std::uint8_t B) {
     H ^= static_cast<std::uint64_t>(B);
     H *= 0xff51afd7ed558ccdULL;
@@ -157,7 +176,15 @@ std::vector<Target> collectTargets(Function &F) {
     std::vector<Target> Targets;
     for (BasicBlock &BB : F)
         for (Instruction &I : BB) {
-            if (auto *CB = dyn_cast<CallBase>(&I)) {
+            if (auto *PN = dyn_cast<PHINode>(&I)) {
+                for (unsigned Op = 0; Op < PN->getNumIncomingValues(); ++Op) {
+                    if (!eligiblePhiIncoming(*PN, Op))
+                        continue;
+                    Targets.push_back(
+                        {&I, Op, cast<ConstantInt>(PN->getIncomingValue(Op)),
+                         true, PN->getIncomingBlock(Op)});
+                }
+            } else if (auto *CB = dyn_cast<CallBase>(&I)) {
                 if (!safeCallArgs(*CB))
                     continue;
                 for (unsigned Op = 0; Op < CB->arg_size(); ++Op) {
@@ -430,9 +457,50 @@ bool selfChecksumConstantsFunction(Function &F,
         return false;
 
     Runtime R = createRuntime(F, Params, Rng);
+    std::map<std::pair<BasicBlock *, BasicBlock *>, BasicBlock *> SplitEdges;
+    auto insertionPoint = [&](const Target &T) -> Instruction * {
+        if (!T.phi_incoming)
+            return T.user;
+        auto *PN = cast<PHINode>(T.user);
+        BasicBlock *Succ = PN->getParent();
+        BasicBlock *Pred = T.incoming_block;
+        auto Key = std::make_pair(Pred, Succ);
+        auto It = SplitEdges.find(Key);
+        if (It != SplitEdges.end())
+            return It->second->getTerminator();
+
+        Instruction *Term = Pred ? Pred->getTerminator() : nullptr;
+        if (!Term)
+            return nullptr;
+        if (Term->getNumSuccessors() == 1)
+            return Term;
+        BasicBlock *Edge =
+            SplitEdge(Pred, Succ, nullptr, nullptr, nullptr,
+                      "morok.sc.phi.edge");
+        if (!Edge)
+            return nullptr;
+        SplitEdges[Key] = Edge;
+        return Edge->getTerminator();
+    };
+
     for (const Target &T : Selected) {
-        Value *Repl = emitFusedConstant(F, R, *T.user, T.value, Rng);
-        T.user->setOperand(T.index, Repl);
+        Instruction *InsertBefore = insertionPoint(T);
+        if (!InsertBefore)
+            continue;
+        Value *Repl = emitFusedConstant(F, R, *InsertBefore, T.value, Rng);
+        if (T.phi_incoming) {
+            auto *PN = cast<PHINode>(T.user);
+            BasicBlock *Incoming = T.incoming_block;
+            auto It = SplitEdges.find(std::make_pair(Incoming, PN->getParent()));
+            if (It != SplitEdges.end())
+                Incoming = It->second;
+            const int IncomingIndex = PN->getBasicBlockIndex(Incoming);
+            if (IncomingIndex < 0)
+                continue;
+            PN->setIncomingValue(static_cast<unsigned>(IncomingIndex), Repl);
+        } else {
+            T.user->setOperand(T.index, Repl);
+        }
     }
 
     relaxMemoryAttrs(F);
