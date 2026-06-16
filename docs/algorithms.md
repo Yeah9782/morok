@@ -582,22 +582,24 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   and Lagrange reconstruction at zero.  Tests cover a fixed reference vector,
   every 3-of-5 subset for all 256 byte secrets, invalid-parameter clamps, and
   constexpr reconstruction.
-- The pass targets safe `i1` through `i64` constant operands of integer binary
-  ops, `icmp`, `select`, casts, PHI incoming values, conditional branch/switch
-  conditions, returns, store values, and ordinary call arguments, then caps
-  selected secrets by `max_secrets` after the per-operand probability gate.
-  Branch destinations, switch case values, store pointers, and other structural
-  operands are skipped.  PHI incoming constants reconstruct on the incoming edge
-  and split conditional predecessors when needed.  Values are split into the covering
-  little-endian bytes and truncated back to the exact source width after
-  reconstruction.
+- The pass targets safe `i1` through `i64` integer constants and scalar
+  `half`/`bfloat`/`float`/`double` constants in binary ops, `icmp`/`fcmp`,
+  `select`, casts, PHI incoming values, conditional branch/switch conditions,
+  returns, store values, and ordinary call arguments, then caps selected secrets
+  by `max_secrets` after the per-operand probability gate.  Branch destinations,
+  switch case values, store pointers, and other structural operands are skipped.
+  PHI incoming constants reconstruct on the incoming edge and split conditional
+  predecessors when needed.  Values are split into the covering little-endian
+  bytes; integer values are truncated back to the exact source width, and
+  floating values are bitcast back from the reconstructed raw bit pattern to
+  preserve NaN payloads and signed zero exactly.
 - Current IR is dominator-deposited fixed-quorum reconstruction: each byte
   secret is split into `n` build-time shares, the first `k` shares are loaded
   volatilely from private mutable `morok.shamir.share.*` globals in the entry
   block and stored volatilely into private `morok.shamir.cell.*` globals.  The
   use site reloads those cells, multiplies them by build-time Lagrange basis
   constants through `morok.gf8mul`, XOR-folds the terms, and reassembles the
-  original integer type.  No runtime inverse table or loop is emitted.
+  original scalar type.  No runtime inverse table or loop is emitted.
 - Scheduler placement is after `SelfChecksum`/`MutualGuardGraph` and before
   `ConstEnc`, so the late integrity passes still see original constants while
   Shamir claims selected remaining operands before generic XOR sharing.  This
@@ -849,7 +851,7 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 - MqGate: planted GF(2) quadratic opaque gates over volatile argument-derived bits.
 - TraceKeying: edge-carried rolling trace accumulator with guards and neutral poisoning.
 - SelfChecksumConstants: constants XORed with runtime checksum diffs for data-only tamper corruption.
-- ShamirShare: selected literals reconstructed from volatile GF(2^8) threshold shares.
+- ShamirShare: selected scalar literals reconstructed from volatile GF(2^8) threshold shares.
 - VectorObfuscation: scalar→SIMD lifting; width 128/256/512, shuffle, lift_comparisons.
 - FunctionWrapper: polymorphic proxies; prob/times/max_wrappers/hard cap 256.
 - FunctionCallObfuscate: dlopen/dlsym indirection; hard cap 256 call sites.

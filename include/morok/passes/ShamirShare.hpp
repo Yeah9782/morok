@@ -2,7 +2,7 @@
 //
 // Morok — modular LLVM IR obfuscator.
 //
-// morok/passes/ShamirShare.hpp — threshold sharing for integer literals.
+// morok/passes/ShamirShare.hpp — threshold sharing for scalar literals.
 
 #ifndef MOROK_PASSES_SHAMIR_SHARE_HPP
 #define MOROK_PASSES_SHAMIR_SHARE_HPP
@@ -27,9 +27,9 @@ struct ShamirShareParams {
     std::uint32_t max_secrets = 8;  ///< per-function transformed literals
 };
 
-/// Replace selected integer literal operands, including PHI incoming values,
+/// Replace selected scalar literal operands, including PHI incoming values,
 /// branch/switch conditions, and store values, with GF(2^8) Shamir
-/// reconstruction.
+/// reconstruction. Floating literals are reconstructed from raw bit patterns.
 bool shamirShareFunction(llvm::Function &F, const ShamirShareParams &params,
                          morok::ir::IRRandom &rng);
 

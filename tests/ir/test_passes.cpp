@@ -1712,6 +1712,89 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("shamirShareFunction reconstructs floating value literals") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+declare void @shamir_fp_arg(float)
+
+define float @shamir_fp_values(float %a, double %d, ptr %p) {
+entry:
+  %x = fadd float %a, 1.500000e+00
+  %cmp = fcmp olt double %d, 2.500000e+00
+  store float 3.500000e+00, ptr %p, align 4
+  call void @shamir_fp_arg(float 4.500000e+00)
+  ret float 5.500000e+00
+}
+)ir");
+    Function *F = M->getFunction("shamir_fp_values");
+    REQUIRE(F);
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(0x5358);
+    morok::ir::IRRandom rng(engine);
+    CHECK(morok::passes::shamirShareFunction(
+        *F,
+        {/*probability=*/100, /*threshold=*/2, /*shares=*/3,
+         /*max_secrets=*/5},
+        rng));
+
+    std::size_t fpBitcasts = 0;
+    for (Instruction &I : instructions(*F)) {
+        if (auto *BC = dyn_cast<BitCastInst>(&I))
+            if (BC->getName().starts_with("morok.shamir.value.fp"))
+                ++fpBitcasts;
+        if (isa<BinaryOperator>(I) || isa<FCmpInst>(I) ||
+            isa<ReturnInst>(I) || isa<StoreInst>(I) || isa<CallInst>(I)) {
+            for (Use &Op : I.operands())
+                CHECK_FALSE(isa<ConstantFP>(Op.get()));
+        }
+    }
+    CHECK(fpBitcasts >= 5u);
+    CHECK(countGlobals(*M, "morok.shamir.share") == 48u);
+    CHECK(countGlobals(*M, "morok.shamir.cell") == 48u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("shamirShareFunction reconstructs floating PHI incoming literals") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define float @shamir_fp_phi(i1 %flag) {
+entry:
+  br i1 %flag, label %join, label %right
+right:
+  br label %join
+join:
+  %p = phi float [ 1.250000e+00, %entry ], [ 2.750000e+00, %right ]
+  ret float %p
+}
+)ir");
+    Function *F = M->getFunction("shamir_fp_phi");
+    REQUIRE(F);
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(0x5359);
+    morok::ir::IRRandom rng(engine);
+    CHECK(morok::passes::shamirShareFunction(
+        *F,
+        {/*probability=*/100, /*threshold=*/2, /*shares=*/3,
+         /*max_secrets=*/2},
+        rng));
+
+    PHINode *Phi = nullptr;
+    bool hasSplitEdge = false;
+    for (BasicBlock &BB : *F) {
+        hasSplitEdge |= BB.getName().starts_with("morok.shamir.phi.edge");
+        for (Instruction &I : BB)
+            if (auto *PN = dyn_cast<PHINode>(&I))
+                Phi = PN;
+    }
+    REQUIRE(Phi);
+    for (Value *Incoming : Phi->incoming_values())
+        CHECK_FALSE(isa<ConstantFP>(Incoming));
+    CHECK(hasSplitEdge);
+    CHECK(countGlobals(*M, "morok.shamir.share") == 16u);
+    CHECK(countGlobals(*M, "morok.shamir.cell") == 16u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("shamirShareFunction reconstructs store value literals") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
