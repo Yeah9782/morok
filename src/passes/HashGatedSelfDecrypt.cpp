@@ -7,9 +7,10 @@
 // IR-safe hash-gated self-decrypting blocks.  Native block encryption requires
 // post-link addresses and W^X cooperation, so this pass implements the
 // roadmap's bytecode route: selected VM bytecode globals receive an outer
-// encrypted layer, a mutable payload, and a per-invocation decryptor gated by a
-// runtime hash of the still-encrypted payload.  The VM helper decrypts before
-// reading bytecode and seals the payload again before returning.
+// encrypted layer, a mutable moving payload, and a per-invocation decryptor
+// gated by a runtime hash of the still-encrypted payload.  The VM helper
+// decrypts before reading bytecode and seals the payload again before
+// returning, rotating the sealed layout so fixed byte offsets go stale.
 
 #include "morok/passes/HashGatedSelfDecrypt.hpp"
 
@@ -53,6 +54,13 @@ struct StreamSchedule {
     std::uint8_t xork = 0;
 };
 
+struct MovingState {
+    std::uint32_t initial_rot = 0;
+    std::uint64_t epoch = 0;
+    std::uint64_t mul = 1;
+    std::uint64_t add = 0;
+};
+
 struct Payload {
     GlobalVariable *bytecode = nullptr;
     Function *helper = nullptr;
@@ -93,6 +101,15 @@ StreamSchedule makeSchedule(ir::IRRandom &Rng) {
     S.add = static_cast<std::uint32_t>(Rng.next());
     S.xork = static_cast<std::uint8_t>(Rng.next());
     return S;
+}
+
+MovingState makeMovingState(ir::IRRandom &Rng, std::uint32_t Size) {
+    MovingState M;
+    M.initial_rot = Size > 1 ? Rng.range(Size - 1) + 1 : 0;
+    M.epoch = Rng.next();
+    M.mul = Rng.next() | 1ULL;
+    M.add = Rng.next();
+    return M;
 }
 
 Value *emitHashStep(Builder &B, Value *H, Value *Byte) {
@@ -141,6 +158,17 @@ std::vector<std::uint8_t> outerEncrypt(ArrayRef<std::uint8_t> Inner,
     S.expected_hash = hashBytes(Outer, S.hash_seed);
     S.key_mask = S.key ^ S.expected_hash;
     return Outer;
+}
+
+std::vector<std::uint8_t> rotateOuter(ArrayRef<std::uint8_t> Outer,
+                                      std::uint32_t Rot) {
+    if (Outer.empty() || Rot == 0)
+        return std::vector<std::uint8_t>(Outer.begin(), Outer.end());
+    std::vector<std::uint8_t> Rotated(Outer.size());
+    const std::uint32_t Size = static_cast<std::uint32_t>(Outer.size());
+    for (std::uint32_t I = 0; I < Size; ++I)
+        Rotated[(I + Rot) % Size] = Outer[I];
+    return Rotated;
 }
 
 void addRuntimeAttrs(Function *F) {
@@ -237,11 +265,88 @@ GlobalVariable *createI64State(Module &M, StringRef Name,
     return State;
 }
 
+GlobalVariable *createI32State(Module &M, StringRef Name,
+                               std::uint32_t Initial) {
+    auto *I32 = Type::getInt32Ty(M.getContext());
+    auto *State = new GlobalVariable(
+        M, I32, /*isConstant=*/false, GlobalValue::PrivateLinkage,
+        ConstantInt::get(I32, Initial), Name.str());
+    State->setAlignment(Align(4));
+    return State;
+}
+
 Value *payloadPtr(Builder &B, GlobalVariable *Payload, Value *Idx) {
     auto *I32 = B.getInt32Ty();
     auto *ArrTy = cast<ArrayType>(Payload->getValueType());
     return B.CreateInBoundsGEP(ArrTy, Payload, {ConstantInt::get(I32, 0), Idx},
                                "morok.sdb.payload.ptr");
+}
+
+Value *scratchPtr(Builder &B, AllocaInst *Scratch, Value *Idx,
+                  const Twine &Name) {
+    auto *I32 = B.getInt32Ty();
+    auto *ArrTy = cast<ArrayType>(Scratch->getAllocatedType());
+    return B.CreateInBoundsGEP(ArrTy, Scratch, {ConstantInt::get(I32, 0), Idx},
+                               Name);
+}
+
+Value *rotatedIndex(Builder &B, Value *Logical, Value *Rot, std::uint32_t Size,
+                    const Twine &Name) {
+    auto *I32 = B.getInt32Ty();
+    if (Size <= 1)
+        return ConstantInt::get(I32, 0);
+    Value *Sum = B.CreateAdd(Logical, Rot, Twine(Name) + ".sum");
+    return B.CreateURem(Sum, ConstantInt::get(I32, Size), Name);
+}
+
+Value *loadMoveRot(Builder &B, GlobalVariable *CurrentRot) {
+    auto *Rot =
+        B.CreateLoad(B.getInt32Ty(), CurrentRot, "morok.sdb.move.rot.load");
+    Rot->setVolatile(true);
+    Rot->setAlignment(Align(4));
+    return Rot;
+}
+
+Value *loadMoveEpoch(Builder &B, GlobalVariable *Epoch) {
+    auto *Loaded =
+        B.CreateLoad(B.getInt64Ty(), Epoch, "morok.sdb.move.epoch.load");
+    Loaded->setVolatile(true);
+    Loaded->setAlignment(Align(8));
+    return Loaded;
+}
+
+Value *mixMoveEpoch(Builder &B, Value *Epoch, Value *ExpectedHash,
+                    Value *KeyMask, Value *StableEnvironmentKey,
+                    const MovingState &Move) {
+    auto *I64 = B.getInt64Ty();
+    Value *X = B.CreateXor(Epoch, ExpectedHash, "morok.sdb.move.epoch.mix");
+    X = B.CreateAdd(X, ConstantInt::get(I64, Move.add),
+                    "morok.sdb.move.epoch.mix");
+    X = B.CreateXor(X, KeyMask, "morok.sdb.move.epoch.mix");
+    X = B.CreateMul(X, ConstantInt::get(I64, Move.mul),
+                    "morok.sdb.move.epoch.mix");
+    X = B.CreateXor(X, StableEnvironmentKey, "morok.sdb.move.epoch.mix");
+    X = B.CreateXor(X, B.CreateLShr(X, ConstantInt::get(I64, 33)),
+                    "morok.sdb.move.epoch.mix");
+    X = B.CreateMul(X, ConstantInt::get(I64, 0xff51afd7ed558ccdULL),
+                    "morok.sdb.move.epoch.mix");
+    return B.CreateXor(X, B.CreateLShr(X, ConstantInt::get(I64, 29)),
+                       "morok.sdb.move.epoch.next");
+}
+
+Value *nextRotation(Builder &B, Value *CurrentRot, Value *NextEpoch,
+                    std::uint32_t Size) {
+    auto *I32 = B.getInt32Ty();
+    if (Size <= 1)
+        return ConstantInt::get(I32, 0);
+    Value *Seed = B.CreateTrunc(NextEpoch, I32, "morok.sdb.move.rot.seed");
+    Value *Step = B.CreateURem(Seed, ConstantInt::get(I32, Size - 1),
+                               "morok.sdb.move.rot.step.raw");
+    Step =
+        B.CreateAdd(Step, ConstantInt::get(I32, 1), "morok.sdb.move.rot.step");
+    Value *Sum = B.CreateAdd(CurrentRot, Step, "morok.sdb.move.rot.sum");
+    return B.CreateURem(Sum, ConstantInt::get(I32, Size),
+                        "morok.sdb.move.rot.next");
 }
 
 Value *asI64(Builder &B, Value *V) {
@@ -507,8 +612,7 @@ Value *emitStableEnvironmentKey(Builder &B, Module &M, Function *IdentityFn,
     auto *I64 = B.getInt64Ty();
     Value *Acc = ConstantInt::get(I64, 0x6a09e667f3bcc909ULL);
 
-    Value *FnAddr =
-        B.CreatePtrToInt(IdentityFn, I64, "morok.sdb.env.live.fn");
+    Value *FnAddr = B.CreatePtrToInt(IdentityFn, I64, "morok.sdb.env.live.fn");
     Acc = mixEnvironmentValue(B, Acc, FnAddr, "morok.sdb.env.live.fn");
     Value *PayloadAddr =
         B.CreatePtrToInt(Payload, I64, "morok.sdb.env.live.payload");
@@ -580,7 +684,8 @@ Value *emitContextZero(Builder &B, Function *Fn) {
 
 Function *createEnsure(Module &M, Payload &P, GlobalVariable *Ready,
                        GlobalVariable *Bound, GlobalVariable *CurrentHash,
-                       GlobalVariable *CurrentKeyMask, const StreamSchedule &S,
+                       GlobalVariable *CurrentKeyMask,
+                       GlobalVariable *CurrentRot, const StreamSchedule &S,
                        bool ContextKeying) {
     LLVMContext &Ctx = M.getContext();
     auto *VoidTy = Type::getVoidTy(Ctx);
@@ -609,6 +714,10 @@ Function *createEnsure(Module &M, Payload &P, GlobalVariable *Ready,
     BasicBlock *Exit = BasicBlock::Create(Ctx, "exit", Fn);
 
     Builder EB(Entry);
+    auto *ScratchTy = ArrayType::get(I8, Size);
+    auto *Scratch =
+        EB.CreateAlloca(ScratchTy, nullptr, "morok.sdb.move.scratch");
+    Scratch->setAlignment(Align(1));
     Value *ContextZero =
         ContextKeying ? emitContextZero(EB, Fn) : ConstantInt::get(I64, 0);
     Value *EnvironmentZero = emitEnvironmentZero(EB, M, Fn, P.bytecode);
@@ -638,6 +747,7 @@ Function *createEnsure(Module &M, Payload &P, GlobalVariable *Ready,
                         ConstantInt::get(I64, 0), "morok.sdb.key.env.live");
     ContextZero =
         EB.CreateXor(ContextZero, ActiveEnvironmentKey, "morok.sdb.key.env");
+    Value *CurrentLayoutRot = loadMoveRot(EB, CurrentRot);
     auto *ReadyLoad = EB.CreateLoad(I1, Ready, "morok.sdb.ready.load");
     ReadyLoad->setVolatile(true);
     ReadyLoad->setAlignment(Align(1));
@@ -648,10 +758,16 @@ Function *createEnsure(Module &M, Payload &P, GlobalVariable *Ready,
     PHINode *Hash = HB.CreatePHI(I64, 2, "morok.sdb.hash");
     HashI->addIncoming(ConstantInt::get(I32, 0), Entry);
     Hash->addIncoming(ConstantInt::get(I64, S.hash_seed), Entry);
-    auto *Enc = HB.CreateLoad(I8, payloadPtr(HB, P.bytecode, HashI),
+    Value *HashPhys = rotatedIndex(HB, HashI, CurrentLayoutRot, Size,
+                                   "morok.sdb.move.hash.phys");
+    auto *Enc = HB.CreateLoad(I8, payloadPtr(HB, P.bytecode, HashPhys),
                               "morok.sdb.hash.byte.enc");
     Enc->setVolatile(true);
     Enc->setAlignment(Align(1));
+    auto *ScratchStore = HB.CreateStore(
+        Enc, scratchPtr(HB, Scratch, HashI, "morok.sdb.move.scratch.ptr"));
+    ScratchStore->setVolatile(true);
+    ScratchStore->setAlignment(Align(1));
     Value *NextHash = emitHashStep(HB, Hash, Enc);
     Value *NextHashI =
         HB.CreateAdd(HashI, ConstantInt::get(I32, 1), "morok.sdb.hash.next");
@@ -674,7 +790,9 @@ Function *createEnsure(Module &M, Payload &P, GlobalVariable *Ready,
     PHINode *DecI = DB.CreatePHI(I32, 2, "morok.sdb.dec.i");
     DecI->addIncoming(ConstantInt::get(I32, 0), Gate);
     Value *DecPtr = payloadPtr(DB, P.bytecode, DecI);
-    auto *Outer = DB.CreateLoad(I8, DecPtr, "morok.sdb.outer");
+    auto *Outer = DB.CreateLoad(
+        I8, scratchPtr(DB, Scratch, DecI, "morok.sdb.move.scratch.ptr"),
+        "morok.sdb.outer");
     Outer->setVolatile(true);
     Outer->setAlignment(Align(1));
     Value *Key = emitKeyByte(DB, DecI, NextHash, KeyMask, ContextZero, S);
@@ -705,8 +823,9 @@ Function *createEnsure(Module &M, Payload &P, GlobalVariable *Ready,
 
 Function *createSeal(Module &M, Payload &P, GlobalVariable *Ready,
                      GlobalVariable *Bound, GlobalVariable *CurrentHash,
-                     GlobalVariable *CurrentKeyMask, const StreamSchedule &S,
-                     bool ContextKeying) {
+                     GlobalVariable *CurrentKeyMask, GlobalVariable *CurrentRot,
+                     GlobalVariable *MoveEpoch, const StreamSchedule &S,
+                     const MovingState &Move, bool ContextKeying) {
     LLVMContext &Ctx = M.getContext();
     auto *VoidTy = Type::getVoidTy(Ctx);
     auto *I1 = Type::getInt1Ty(Ctx);
@@ -726,10 +845,15 @@ Function *createSeal(Module &M, Payload &P, GlobalVariable *Ready,
 
     BasicBlock *Entry = BasicBlock::Create(Ctx, "entry", Fn);
     BasicBlock *SealLoop = BasicBlock::Create(Ctx, "seal", Fn);
+    BasicBlock *PublishLoop = BasicBlock::Create(Ctx, "publish", Fn);
     BasicBlock *Done = BasicBlock::Create(Ctx, "done", Fn);
     BasicBlock *Exit = BasicBlock::Create(Ctx, "exit", Fn);
 
     Builder EB(Entry);
+    auto *ScratchTy = ArrayType::get(I8, Size);
+    auto *Scratch =
+        EB.CreateAlloca(ScratchTy, nullptr, "morok.sdb.move.scratch");
+    Scratch->setAlignment(Align(1));
     Value *ContextZero =
         ContextKeying ? emitContextZero(EB, Fn) : ConstantInt::get(I64, 0);
     Value *EnvironmentZero = emitEnvironmentZero(EB, M, Fn, P.bytecode);
@@ -756,6 +880,11 @@ Function *createSeal(Module &M, Payload &P, GlobalVariable *Ready,
     Value *KeyMask = EB.CreateSelect(BoundLoad, KeyMaskLoad,
                                      ConstantInt::get(I64, S.key_mask),
                                      "morok.sdb.bound.keymask");
+    Value *CurrentLayoutRot = loadMoveRot(EB, CurrentRot);
+    Value *CurrentEpoch = loadMoveEpoch(EB, MoveEpoch);
+    Value *NextEpoch = mixMoveEpoch(EB, CurrentEpoch, ExpectedHash, KeyMask,
+                                    StableEnvironmentKey, Move);
+    Value *NextLayoutRot = nextRotation(EB, CurrentLayoutRot, NextEpoch, Size);
     auto *ReadyLoad = EB.CreateLoad(I1, Ready, "morok.sdb.ready.load");
     ReadyLoad->setVolatile(true);
     ReadyLoad->setAlignment(Align(1));
@@ -773,16 +902,38 @@ Function *createSeal(Module &M, Payload &P, GlobalVariable *Ready,
     Value *Key = emitKeyByte(SB, SealI, ExpectedHash, KeyMask, ContextZero, S);
     Value *Outer = SB.CreateXor(Inner, Key, "morok.sdb.outer.seal");
     Value *NextSealHash = emitHashStep(SB, SealHash, Outer);
-    auto *Store = SB.CreateStore(Outer, SealPtr);
-    Store->setVolatile(true);
-    Store->setAlignment(Align(1));
+    auto *ScratchStore = SB.CreateStore(
+        Outer, scratchPtr(SB, Scratch, SealI, "morok.sdb.move.scratch.ptr"));
+    ScratchStore->setVolatile(true);
+    ScratchStore->setAlignment(Align(1));
     Value *NextSealI =
         SB.CreateAdd(SealI, ConstantInt::get(I32, 1), "morok.sdb.seal.next");
     SealI->addIncoming(NextSealI, SealLoop);
     SealHash->addIncoming(NextSealHash, SealLoop);
     Value *SealDone = SB.CreateICmpEQ(NextSealI, ConstantInt::get(I32, Size),
                                       "morok.sdb.seal.done");
-    SB.CreateCondBr(SealDone, Done, SealLoop);
+    SB.CreateCondBr(SealDone, PublishLoop, SealLoop);
+
+    Builder PB(PublishLoop);
+    PHINode *PubI = PB.CreatePHI(I32, 2, "morok.sdb.move.publish.i");
+    PubI->addIncoming(ConstantInt::get(I32, 0), SealLoop);
+    auto *MovedOuter = PB.CreateLoad(
+        I8, scratchPtr(PB, Scratch, PubI, "morok.sdb.move.scratch.ptr"),
+        "morok.sdb.move.publish.outer");
+    MovedOuter->setVolatile(true);
+    MovedOuter->setAlignment(Align(1));
+    Value *PubPhys = rotatedIndex(PB, PubI, NextLayoutRot, Size,
+                                  "morok.sdb.move.publish.phys");
+    auto *PublishStore =
+        PB.CreateStore(MovedOuter, payloadPtr(PB, P.bytecode, PubPhys));
+    PublishStore->setVolatile(true);
+    PublishStore->setAlignment(Align(1));
+    Value *NextPubI = PB.CreateAdd(PubI, ConstantInt::get(I32, 1),
+                                   "morok.sdb.move.publish.next");
+    PubI->addIncoming(NextPubI, PublishLoop);
+    Value *PublishDone = PB.CreateICmpEQ(NextPubI, ConstantInt::get(I32, Size),
+                                         "morok.sdb.move.publish.done");
+    PB.CreateCondBr(PublishDone, Done, PublishLoop);
 
     Builder DB(Done);
     auto *HashStore = DB.CreateStore(NextSealHash, CurrentHash);
@@ -794,6 +945,12 @@ Function *createSeal(Module &M, Payload &P, GlobalVariable *Ready,
     auto *KeyMaskStore = DB.CreateStore(NextKeyMask, CurrentKeyMask);
     KeyMaskStore->setVolatile(true);
     KeyMaskStore->setAlignment(Align(8));
+    auto *RotStore = DB.CreateStore(NextLayoutRot, CurrentRot);
+    RotStore->setVolatile(true);
+    RotStore->setAlignment(Align(4));
+    auto *EpochStore = DB.CreateStore(NextEpoch, MoveEpoch);
+    EpochStore->setVolatile(true);
+    EpochStore->setAlignment(Align(8));
     auto *BoundStore = DB.CreateStore(ConstantInt::get(I1, true), Bound);
     BoundStore->setVolatile(true);
     BoundStore->setAlignment(Align(1));
@@ -851,9 +1008,13 @@ void insertSealCalls(Function *Helper, Function *Seal) {
 bool wrapPayload(Module &M, Payload &P,
                  const HashGatedSelfDecryptParams &Params, ir::IRRandom &Rng) {
     StreamSchedule S = makeSchedule(Rng);
+    MovingState Move =
+        makeMovingState(Rng, static_cast<std::uint32_t>(P.original.size()));
     std::vector<std::uint8_t> Outer = outerEncrypt(
         ArrayRef<std::uint8_t>(P.original.data(), P.original.size()), S);
-    makeMutablePayload(*P.bytecode, Outer);
+    std::vector<std::uint8_t> RotatedOuter =
+        rotateOuter(Outer, Move.initial_rot);
+    makeMutablePayload(*P.bytecode, RotatedOuter);
     GlobalVariable *Ready = createReady(M, P.suffix);
     GlobalVariable *Bound =
         createI1State(M, "morok.sdb.bound." + P.suffix, false);
@@ -861,10 +1022,16 @@ bool wrapPayload(Module &M, Payload &P,
         createI64State(M, "morok.sdb.bound.hash." + P.suffix, S.expected_hash);
     GlobalVariable *CurrentKeyMask =
         createI64State(M, "morok.sdb.bound.keymask." + P.suffix, S.key_mask);
-    Function *Ensure = createEnsure(M, P, Ready, Bound, CurrentHash,
-                                    CurrentKeyMask, S, Params.context_keying);
-    Function *Seal = createSeal(M, P, Ready, Bound, CurrentHash, CurrentKeyMask,
-                                S, Params.context_keying);
+    GlobalVariable *CurrentRot =
+        createI32State(M, "morok.sdb.move.rot." + P.suffix, Move.initial_rot);
+    GlobalVariable *MoveEpoch =
+        createI64State(M, "morok.sdb.move.epoch." + P.suffix, Move.epoch);
+    Function *Ensure =
+        createEnsure(M, P, Ready, Bound, CurrentHash, CurrentKeyMask,
+                     CurrentRot, S, Params.context_keying);
+    Function *Seal =
+        createSeal(M, P, Ready, Bound, CurrentHash, CurrentKeyMask, CurrentRot,
+                   MoveEpoch, S, Move, Params.context_keying);
     insertEnsureCall(P.helper, Ensure);
     insertSealCalls(P.helper, Seal);
     return true;

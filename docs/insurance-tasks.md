@@ -80,7 +80,7 @@ Tags: `[platform · extends <pass> | new]`. All `XL` Windows items presume the
 - [x] Disassembler desync via raw byte sleds (junk after unconditional jumps, overlapping/aliased instructions, jump-into-mid-instruction) emitted through inline asm `[xplat · new]`
 - [x] Execute from `memfd` only: re-exec self from `memfd_create` + `execveat` so the running image is unbacked by an on-disk file `[linux · new]`
 - [x] Schrödinger pages: keep code `NOACCESS`, made readable only by a fault handler that validates the faulting RIP is legitimate code; any external reader faults and trips a tripwire `[xplat · new]`
-- [ ] Moving-target hot-rewrite: continuously relocate/re-encrypt hot functions to fresh addresses so fixed-address breakpoints/patches go stale (macOS W^X caveat) `[xplat · extends selfdecrypt/polymorph]`
+- [x] Moving-target hot-rewrite: continuously relocate/re-encrypt hot functions to fresh addresses so fixed-address breakpoints/patches go stale (macOS W^X caveat) `[xplat · extends selfdecrypt/polymorph]`
 - [ ] Anti-dump: corrupt the in-memory ELF/Mach-O header + section table after load, keep only the executing block decrypted, guard pages to trip `/proc/pid/mem` scans `[posix · new]`
 - [ ] Nanomites: replace conditional branches with `int3`; an encrypted address→branch table held only by the self-debugger interprets them at runtime (needs the buddy/self-debugger infra) `[posix · new]`
 - [ ] Page-fault/TLB-timing single-step oracle: spread code over many pages and detect anomalous fault pattern/latency under single-stepping incl. EPT (low confidence, FP-prone) `[xplat · new]`

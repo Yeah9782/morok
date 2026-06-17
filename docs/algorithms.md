@@ -627,6 +627,15 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   reads as zero-valued provenance so instrumentation has to preserve the same
   observation path without making the payload depend on an unstable counter
   value.
+- Each sealed payload also carries volatile `morok.sdb.move.rot.*` and
+  `morok.sdb.move.epoch.*` state.  The on-disk outer ciphertext starts at a
+  per-build physical rotation.  Ensure hashes encrypted bytes in logical order
+  through the current rotation into a stack scratch buffer, then decrypts that
+  scratch back into canonical VM bytecode.  Seal encrypts canonical plaintext
+  into scratch, derives a nonzero next rotation from the epoch, payload hash,
+  keymask, and environment key, publishes ciphertext into the new physical
+  layout, and stores the new rotation/epoch.  A fixed byte offset learned from
+  one invocation therefore names a different encrypted byte after the next seal.
 - The ensure helper derives the stream key from the computed hash, decrypts each
   payload byte with volatile stores, sets the active flag volatile only after
   the post-decrypt gate succeeds, and returns.  The seal helper derives the same

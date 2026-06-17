@@ -6464,6 +6464,8 @@ entry:
     CHECK(countGlobals(*M, "morok.sdb.bound.") == 3u);
     CHECK(countGlobals(*M, "morok.sdb.bound.hash.") == 1u);
     CHECK(countGlobals(*M, "morok.sdb.bound.keymask.") == 1u);
+    CHECK(countGlobals(*M, "morok.sdb.move.rot.") == 1u);
+    CHECK(countGlobals(*M, "morok.sdb.move.epoch.") == 1u);
     Function *Ensure = M->getFunction("morok.sdb.ensure.vm_secret");
     REQUIRE(Ensure);
     Function *Seal = M->getFunction("morok.sdb.seal.vm_secret");
@@ -6502,11 +6504,22 @@ entry:
     bool hasVolatileBoundLoad = false;
     bool hasVolatileBoundHashLoad = false;
     bool hasVolatileBoundKeyMaskLoad = false;
+    bool ensureLoadsMoveRot = false;
+    bool ensureHashesMovedPayload = false;
+    bool ensureStagesOuter = false;
+    bool ensureReadsStagedOuter = false;
     bool sealUsesEnv = false;
     bool sealHashesOuter = false;
     bool sealStoresBound = false;
     bool sealStoresBoundHash = false;
     bool sealStoresBoundKeyMask = false;
+    bool sealLoadsMoveRot = false;
+    bool sealLoadsMoveEpoch = false;
+    bool sealComputesNextEpoch = false;
+    bool sealComputesNextRot = false;
+    bool sealStoresMoveRot = false;
+    bool sealStoresMoveEpoch = false;
+    bool sealPublishesMovedPayload = false;
     bool sealComputesNextKeyMask = false;
     bool storesPayload = false;
     bool sealStoresPayload = false;
@@ -6542,6 +6555,8 @@ entry:
             hasCycleProbe = true;
         if (I.getName().starts_with("morok.sdb.env.volume"))
             hasVolumeProbe = true;
+        if (I.getName().starts_with("morok.sdb.move.hash.phys"))
+            ensureHashesMovedPayload = true;
         if (auto *CI = dyn_cast<CallInst>(&I))
             if (Function *Callee = CI->getCalledFunction())
                 hasTrap |= Callee->getName() == "llvm.trap";
@@ -6572,6 +6587,14 @@ entry:
                 LI->isVolatile() &&
                 LI->getPointerOperand()->getName().starts_with(
                     "morok.sdb.bound.keymask.");
+            ensureLoadsMoveRot |=
+                LI->isVolatile() &&
+                LI->getPointerOperand()->getName().starts_with(
+                    "morok.sdb.move.rot.");
+            ensureReadsStagedOuter |=
+                LI->isVolatile() &&
+                LI->getPointerOperand()->getName().starts_with(
+                    "morok.sdb.move.scratch.ptr");
         }
         if (auto *LI = dyn_cast<LoadInst>(&I))
             hasVolatileContextLoad |=
@@ -6589,6 +6612,10 @@ entry:
                     "morok.sdb.context.slot");
             storesPayload |= SI->getPointerOperand()->getName().starts_with(
                 "morok.sdb.payload.ptr");
+            ensureStagesOuter |=
+                SI->isVolatile() &&
+                SI->getPointerOperand()->getName().starts_with(
+                    "morok.sdb.move.scratch.ptr");
         }
     }
     for (BasicBlock &BB : *Ensure) {
@@ -6627,8 +6654,24 @@ entry:
             sealUsesEnv = true;
         if (I.getName().starts_with("morok.sdb.seal.hash"))
             sealHashesOuter = true;
+        if (I.getName().starts_with("morok.sdb.move.epoch.next"))
+            sealComputesNextEpoch = true;
+        if (I.getName().starts_with("morok.sdb.move.rot.next"))
+            sealComputesNextRot = true;
+        if (I.getName().starts_with("morok.sdb.move.publish.phys"))
+            sealPublishesMovedPayload = true;
         if (I.getName().starts_with("morok.sdb.bound.keymask.next"))
             sealComputesNextKeyMask = true;
+        if (auto *LI = dyn_cast<LoadInst>(&I)) {
+            sealLoadsMoveRot |=
+                LI->isVolatile() &&
+                LI->getPointerOperand()->getName().starts_with(
+                    "morok.sdb.move.rot.");
+            sealLoadsMoveEpoch |=
+                LI->isVolatile() &&
+                LI->getPointerOperand()->getName().starts_with(
+                    "morok.sdb.move.epoch.");
+        }
         if (auto *SI = dyn_cast<StoreInst>(&I)) {
             hasVolatileSealReadyStore |=
                 SI->isVolatile() &&
@@ -6646,6 +6689,14 @@ entry:
                 SI->isVolatile() &&
                 SI->getPointerOperand()->getName().starts_with(
                     "morok.sdb.bound.keymask.");
+            sealStoresMoveRot |=
+                SI->isVolatile() &&
+                SI->getPointerOperand()->getName().starts_with(
+                    "morok.sdb.move.rot.");
+            sealStoresMoveEpoch |=
+                SI->isVolatile() &&
+                SI->getPointerOperand()->getName().starts_with(
+                    "morok.sdb.move.epoch.");
             sealStoresPayload |=
                 SI->isVolatile() &&
                 SI->getPointerOperand()->getName().starts_with(
@@ -6672,11 +6723,22 @@ entry:
     CHECK(hasVolatileBoundLoad);
     CHECK(hasVolatileBoundHashLoad);
     CHECK(hasVolatileBoundKeyMaskLoad);
+    CHECK(ensureLoadsMoveRot);
+    CHECK(ensureHashesMovedPayload);
+    CHECK(ensureStagesOuter);
+    CHECK(ensureReadsStagedOuter);
     CHECK(sealUsesEnv);
     CHECK(sealHashesOuter);
     CHECK(sealStoresBound);
     CHECK(sealStoresBoundHash);
     CHECK(sealStoresBoundKeyMask);
+    CHECK(sealLoadsMoveRot);
+    CHECK(sealLoadsMoveEpoch);
+    CHECK(sealComputesNextEpoch);
+    CHECK(sealComputesNextRot);
+    CHECK(sealStoresMoveRot);
+    CHECK(sealStoresMoveEpoch);
+    CHECK(sealPublishesMovedPayload);
     CHECK(sealComputesNextKeyMask);
     CHECK(storesPayload);
     CHECK(sealStoresPayload);
