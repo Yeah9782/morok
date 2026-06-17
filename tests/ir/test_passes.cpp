@@ -2824,11 +2824,13 @@ entry:
         *F, {/*probability=*/100, /*max_blocks=*/4, /*depth=*/4}, rng));
 
     CHECK(M->getGlobalVariable("morok.decoy.opaque", true) != nullptr);
+    CHECK(M->getGlobalVariable("morok.decoy.state", true) != nullptr);
     bool hasPredicate = false;
     bool hasDecoyBlock = false;
     bool hasDecoyReturn = false;
     bool hasAltArithmetic = false;
     bool hasVolatileLoad = false;
+    bool hasHiddenStateStore = false;
     for (BasicBlock &BB : *F) {
         if (BB.getName().starts_with("morok.decoy.alt")) {
             hasDecoyBlock = true;
@@ -2842,6 +2844,11 @@ entry:
                 hasAltArithmetic = true;
             if (auto *LI = dyn_cast<LoadInst>(&I))
                 hasVolatileLoad |= LI->isVolatile();
+            if (auto *SI = dyn_cast<StoreInst>(&I))
+                hasHiddenStateStore |=
+                    SI->isVolatile() &&
+                    SI->getPointerOperand()->getName().starts_with(
+                        "morok.decoy.state");
         }
     }
     CHECK(hasPredicate);
@@ -2849,6 +2856,7 @@ entry:
     CHECK(hasDecoyReturn);
     CHECK(hasAltArithmetic);
     CHECK(hasVolatileLoad);
+    CHECK(hasHiddenStateStore);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
@@ -4973,6 +4981,42 @@ entry:
     CHECK(hasVolatileRegionLoad);
     CHECK(hasVolatileExpectedLoad);
     CHECK(encryptedDiffersFromPlain);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("dataFlowIntegrityFunction folds decoy hidden state into diff") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+@morok.decoy.state = private global i64 0, align 8
+
+define i8 @dfi_decoy(i8 %a, i8 %b) {
+entry:
+  %x = xor i8 %a, %b
+  ret i8 %x
+}
+)ir");
+    Function *F = M->getFunction("dfi_decoy");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(841);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::dataFlowIntegrityFunction(
+        *F, {/*probability=*/100, /*max_tables=*/1, /*region_bytes=*/32}, rng));
+
+    bool hasDecoyStateLoad = false;
+    bool hasDecoyDiff = false;
+    for (Instruction &I : instructions(*F)) {
+        if (auto *LI = dyn_cast<LoadInst>(&I)) {
+            hasDecoyStateLoad |=
+                LI->isVolatile() &&
+                LI->getPointerOperand()->getName().starts_with(
+                    "morok.decoy.state");
+        }
+        hasDecoyDiff |= I.getName().starts_with("morok.dfi.decoy.diff");
+    }
+
+    CHECK(hasDecoyStateLoad);
+    CHECK(hasDecoyDiff);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 

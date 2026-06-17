@@ -421,7 +421,12 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   discard the arm by spotting meaningless noise.
 - Runtime semantics are preserved because the volatile predicate is true for
   the private global at execution, while LLVM may not fold the volatile loads.
-  The pass skips void, aggregate/vector, and generated `morok.decoy.*` blocks.
+  If the false arm is patched into execution, it volatile-mixes the alternate
+  value into private `morok.decoy.state` and marks it nonzero.  DFI consumes
+  that state when present, so a patched decoy check can poison later
+  integrity-entangled table indices and decode keys rather than failing only at
+  the decoy site.  The pass skips void, aggregate/vector, and generated
+  `morok.decoy.*` blocks.
 - Scheduler placement is after AliasOpaquePredicates and before flattening, so
   flattening/IFSM/dispatcherless routing absorb coherent dead arms as ordinary
   CFG rather than exposing a late BCF signature.
@@ -653,7 +658,9 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   comparisons.  Decoded arithmetic values are truncated back to the source width
   and decoded comparison bytes to `i1`.  Region or expected-hash tampering
   changes both the selected table cell and the key, corrupting the value in data
-  flow.
+  flow.  If coherent decoys have emitted `morok.decoy.state`, DFI volatile-loads
+  that hidden state and XORs it into `runtime_diff`; valid runs see zero, while
+  patched decoy arms feed the same index/key corruption path.
 - The table stays encoded at rest; unlike generic TableArithmetic, there is no
   lazy plaintext materialization pass.  There is also no trap or integrity
   branch, only data poisoning.
@@ -987,8 +994,8 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 - PhiTangling: redundant scalar integer/FP edge-copy/direct PHI webs; zero cross-terms rewrite uses.
 - AliasOpaquePredicates: maintained pointer/alias memory invariant guards with decoy edges.
 - ExternalOpaquePredicates: IPO-blocked volatile context helper guards with scratch decoy edges.
-- CoherentDecoys: opaque-dead alternate return computations, not junk blocks.
-- DataFlowIntegrity: `i1..i8` and const-indexed `i9..i16` op tables decoded by runtime integrity hashes.
+- CoherentDecoys: opaque-dead alternate return computations plus hidden decoy-tamper state, not junk blocks.
+- DataFlowIntegrity: `i1..i8` and const-indexed `i9..i16` op tables decoded by runtime integrity hashes and decoy hidden state.
 - OptimizerAmplification: early branchless select lattice over equivalent integer op / integer compare / FP compare forms.
 - SubThresholdPersistence: volatile local-seed opaque-zero terms for scalar integer/FP ops under a small cap.
 - TableArithmetic: encrypted lazy `i1..i8` and const-indexed `i9..i16` op lookup tables.

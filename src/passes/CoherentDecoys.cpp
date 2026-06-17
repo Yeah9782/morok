@@ -8,7 +8,9 @@
 // block, the real return block, and a dead alternate return block.  The guard
 // uses two volatile loads from a private global, so the predicate is true at
 // runtime but not foldable.  The decoy return computes a type-correct value
-// from real inputs and live values rather than emitting arbitrary junk.
+// from real inputs and live values rather than emitting arbitrary junk.  If the
+// false arm is patched into execution, it records a nonzero hidden state that
+// later integrity-entangled data flow can consume.
 
 #include "morok/passes/CoherentDecoys.hpp"
 
@@ -37,6 +39,7 @@ namespace morok::passes {
 namespace {
 
 constexpr char kOpaqueGlobal[] = "morok.decoy.opaque";
+constexpr char kStateGlobal[] = "morok.decoy.state";
 constexpr char kAltBlock[] = "morok.decoy.alt";
 
 GlobalVariable *opaqueGlobal(Module &M, ir::IRRandom &rng) {
@@ -48,6 +51,17 @@ GlobalVariable *opaqueGlobal(Module &M, ir::IRRandom &rng) {
         ConstantInt::get(I32, static_cast<std::uint32_t>(rng.next())),
         kOpaqueGlobal);
     GV->setAlignment(Align(4));
+    return GV;
+}
+
+GlobalVariable *stateGlobal(Module &M) {
+    if (auto *GV = M.getGlobalVariable(kStateGlobal, /*AllowInternal=*/true))
+        return GV;
+    auto *I64 = Type::getInt64Ty(M.getContext());
+    auto *GV = new GlobalVariable(
+        M, I64, /*isConstant=*/false, GlobalValue::PrivateLinkage,
+        ConstantInt::get(I64, 0), kStateGlobal);
+    GV->setAlignment(Align(8));
     return GV;
 }
 
@@ -149,6 +163,52 @@ Value *asReturnType(IRBuilder<NoFolder> &B, Value *V, Type *RetTy) {
     if (auto *IT = dyn_cast<IntegerType>(RetTy))
         return asIntegerReturnType(B, V, IT);
     return asFloatingReturnType(B, V, RetTy);
+}
+
+Value *asI64Bits(IRBuilder<NoFolder> &B, Value *V) {
+    auto *I64 = B.getInt64Ty();
+    Type *Ty = V->getType();
+    Value *Frozen = B.CreateFreeze(V, "morok.decoy.state.freeze");
+    if (auto *IT = dyn_cast<IntegerType>(Ty)) {
+        if (IT->getBitWidth() > 64)
+            return nullptr;
+        return B.CreateZExtOrTrunc(Frozen, I64, "morok.decoy.state.bits");
+    }
+    if (isSupportedFp(Ty)) {
+        auto *Carrier = integerCarrierForFp(Ty);
+        if (!Carrier || Carrier->getBitWidth() > 64)
+            return nullptr;
+        Value *Bits = B.CreateBitCast(Frozen, Carrier,
+                                      "morok.decoy.state.rawbits");
+        return B.CreateZExtOrTrunc(Bits, I64, "morok.decoy.state.bits");
+    }
+    return nullptr;
+}
+
+void recordDecoyExecution(IRBuilder<NoFolder> &B, GlobalVariable *State,
+                          Value *Alt, ir::IRRandom &rng) {
+    Value *Bits = asI64Bits(B, Alt);
+    if (!Bits)
+        return;
+    auto *I64 = B.getInt64Ty();
+    auto *Cur = B.CreateLoad(I64, State, "morok.decoy.state.load");
+    Cur->setVolatile(true);
+    Cur->setAlignment(Align(8));
+    Value *Mix =
+        B.CreateXor(Cur, ConstantInt::get(I64, rng.next()),
+                    "morok.decoy.state.mix");
+    Mix = B.CreateAdd(Mix, Bits, "morok.decoy.state.mix");
+    Mix = B.CreateXor(Mix,
+                      B.CreateShl(Bits, ConstantInt::get(I64, 7),
+                                  "morok.decoy.state.shift"),
+                      "morok.decoy.state.mix");
+    Mix = B.CreateMul(Mix, ConstantInt::get(I64, rng.next() | 1ull),
+                      "morok.decoy.state.mix");
+    Mix = B.CreateOr(Mix, ConstantInt::get(I64, 1),
+                     "morok.decoy.state.mark");
+    auto *Store = B.CreateStore(Mix, State);
+    Store->setVolatile(true);
+    Store->setAlignment(Align(8));
 }
 
 void addTerm(Value *V, Type *RetTy, SmallPtrSetImpl<Value *> &Seen,
@@ -268,7 +328,7 @@ Value *opaqueTrue(IRBuilder<NoFolder> &B, GlobalVariable *GV) {
     return B.CreateICmpEQ(A, Bv, "morok.decoy.pred");
 }
 
-bool rewriteReturn(ReturnInst *RI, GlobalVariable *GV,
+bool rewriteReturn(ReturnInst *RI, GlobalVariable *GV, GlobalVariable *State,
                    const CoherentDecoyParams &Params, ir::IRRandom &rng) {
     BasicBlock *Head = RI->getParent();
     Function *F = Head->getParent();
@@ -278,6 +338,7 @@ bool rewriteReturn(ReturnInst *RI, GlobalVariable *GV,
     auto *AltBB = BasicBlock::Create(F->getContext(), kAltBlock, F, Real);
     IRBuilder<NoFolder> AltB(AltBB);
     Value *Alt = buildAlternateValue(AltB, *RI, *Head, Params, rng);
+    recordDecoyExecution(AltB, State, Alt, rng);
     AltB.CreateRet(Alt);
 
     IRBuilder<NoFolder> GuardB(HeadTerm);
@@ -301,6 +362,7 @@ bool coherentDecoysFunction(Function &F, const CoherentDecoyParams &params,
         return false;
 
     GlobalVariable *GV = nullptr;
+    GlobalVariable *State = nullptr;
     bool Changed = false;
     std::uint32_t Count = 0;
     for (ReturnInst *RI : Returns) {
@@ -310,7 +372,9 @@ bool coherentDecoysFunction(Function &F, const CoherentDecoyParams &params,
             continue;
         if (!GV)
             GV = opaqueGlobal(*F.getParent(), rng);
-        Changed |= rewriteReturn(RI, GV, params, rng);
+        if (!State)
+            State = stateGlobal(*F.getParent());
+        Changed |= rewriteReturn(RI, GV, State, params, rng);
         ++Count;
     }
     return Changed;

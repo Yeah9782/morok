@@ -10,7 +10,8 @@
 // byte region plus the expected hash; if the region or expected value changes,
 // the operation result is corrupted as data rather than guarded by a separable
 // branch.  The same diff also perturbs the live table index, so tampering
-// changes both the decode key and the semantic cell being read.
+// changes both the decode key and the semantic cell being read.  When coherent
+// decoys are present, their hidden patch state is folded into the same diff.
 
 #include "morok/passes/DataFlowIntegrity.hpp"
 
@@ -45,6 +46,7 @@ using Builder = IRBuilder<NoFolder>;
 
 constexpr std::uint32_t kTableSize = 1u << 16;
 constexpr std::uint32_t kMaxTablesPerInvocation = 8;
+constexpr char kDecoyStateName[] = "morok.decoy.state";
 
 struct KeySchedule {
     std::uint64_t expected_hash = 0;
@@ -602,8 +604,17 @@ Value *emitLookup(Module &M, Function &F, Runtime &R, Target &T,
     auto *TableTy = cast<ArrayType>(Table->getValueType());
     auto *ElementTy = cast<IntegerType>(TableTy->getElementType());
 
-    auto *Diff = B.CreateCall(R.diff->getFunctionType(), R.diff, {},
-                              "morok.dfi.hash.call");
+    Value *Diff = B.CreateCall(R.diff->getFunctionType(), R.diff, {},
+                               "morok.dfi.hash.call");
+    if (auto *DecoyState = M.getGlobalVariable(kDecoyStateName, true)) {
+        if (DecoyState->getValueType()->isIntegerTy(64)) {
+            auto *State =
+                B.CreateLoad(I64, DecoyState, "morok.dfi.decoy.state");
+            State->setVolatile(true);
+            State->setAlignment(Align(8));
+            Diff = B.CreateXor(Diff, State, "morok.dfi.decoy.diff");
+        }
+    }
     Value *Seed = B.CreateXor(Diff, ConstantInt::get(I64, Key.expected_hash),
                               "morok.dfi.seed");
     Value *Lhs = I.getOperand(0);
