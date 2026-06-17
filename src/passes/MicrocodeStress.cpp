@@ -277,9 +277,12 @@ antiDisasmHopAsm(const Triple &TT) {
             "popq %rax\n\t"
             "leaq 1f-0b(%rax), %rax\n\t"
             "jmpq *%rax\n\t"
-            ".byte 0xe8,0x13,0x37,0x00,0x00\n\t"
+            ".byte 0xe9,0x13,0x37,0x00,0x00\n\t"
+            ".byte 0x0f,0x85\n"
+            "1:\n\t"
+            ".byte 0x90,0x90,0xeb,0x04\n\t"
             ".byte 0xc3,0x90,0x0f,0x0b\n"
-            "1:",
+            "2:",
             "~{rax},~{dirflag},~{fpsr},~{flags},~{memory}"};
     case Triple::x86:
         return std::pair<StringRef, StringRef>{
@@ -288,17 +291,22 @@ antiDisasmHopAsm(const Triple &TT) {
             "popl %eax\n\t"
             "leal 1f-0b(%eax), %eax\n\t"
             "jmp *%eax\n\t"
-            ".byte 0xe8,0x13,0x37,0x00,0x00\n\t"
+            ".byte 0xe9,0x13,0x37,0x00,0x00\n\t"
+            ".byte 0x0f,0x85\n"
+            "1:\n\t"
+            ".byte 0x90,0x90,0xeb,0x04\n\t"
             ".byte 0xc3,0x90,0x0f,0x0b\n"
-            "1:",
+            "2:",
             "~{eax},~{dirflag},~{fpsr},~{flags},~{memory}"};
     case Triple::aarch64:
     case Triple::aarch64_be:
         return std::pair<StringRef, StringRef>{
             "adr x16, 0f\n\t"
             "br x16\n\t"
-            ".inst 0x14000002\n\t"
-            ".inst 0xd65f03c0\n"
+            ".inst 0x14000003\n\t"
+            ".inst 0xd4200000\n\t"
+            ".inst 0xd65f03c0\n\t"
+            ".inst 0xd503201f\n"
             "0:",
             "~{x16},~{memory}"};
     default:
@@ -380,7 +388,13 @@ analysisBaitAsm(const Triple &TT) {
     switch (TT.getArch()) {
     case Triple::x86_64:
         return std::pair<StringRef, StringRef>{
+            "jmp 1f\n\t"
+            ".byte 0xe9,0x44,0x33,0x22,0x11\n\t"
+            ".byte 0x0f,0x85\n"
+            "1:\n\t"
+            ".byte 0x90,0x90\n\t"
             "jmp 0f\n\t"
+            ".byte 0xc3,0x90,0x0f,0x0b\n\t"
             ".byte 0xf3,0x0f,0x1e,0xfa\n\t"
             ".byte 0x55,0x48,0x89,0xe5\n\t"
             ".byte 0x5d,0xc3\n\t"
@@ -389,7 +403,13 @@ analysisBaitAsm(const Triple &TT) {
             "~{dirflag},~{fpsr},~{flags},~{memory}"};
     case Triple::x86:
         return std::pair<StringRef, StringRef>{
+            "jmp 1f\n\t"
+            ".byte 0xe9,0x44,0x33,0x22,0x11\n\t"
+            ".byte 0x0f,0x85\n"
+            "1:\n\t"
+            ".byte 0x90,0x90\n\t"
             "jmp 0f\n\t"
+            ".byte 0xc3,0x90,0x0f,0x0b\n\t"
             ".byte 0xf3,0x0f,0x1e,0xfb\n\t"
             ".byte 0x55,0x89,0xe5\n\t"
             ".byte 0x5d,0xc3\n"
@@ -399,6 +419,9 @@ analysisBaitAsm(const Triple &TT) {
     case Triple::aarch64_be:
         return std::pair<StringRef, StringRef>{
             "b 0f\n\t"
+            ".inst 0x14000003\n\t"
+            ".inst 0xd4200000\n\t"
+            ".inst 0xd65f03c0\n\t"
             ".inst 0xd503245f\n\t"
             ".inst 0xa9bf7bfd\n\t"
             ".inst 0x910003fd\n\t"

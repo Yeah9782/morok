@@ -8174,6 +8174,7 @@ join:
     bool hasIntToPtr = false;
     bool hasIndex = false;
     bool hasAntiDisasmHop = false;
+    bool hasMidInstructionHop = false;
     for (BasicBlock &BB : *F) {
         const bool IsDecoy = BB.getName().starts_with("morok.micro.decoy");
         if (IsDecoy)
@@ -8188,6 +8189,10 @@ join:
                     hasAntiDisasmHop |= S.contains("callq 0f") &&
                                         S.contains("popq %rax") &&
                                         S.contains("jmpq *%rax");
+                    hasMidInstructionHop |=
+                        S.contains(".byte 0x0f,0x85") &&
+                        S.contains(".byte 0x90,0x90,0xeb,0x04") &&
+                        S.contains(".byte 0xc3,0x90,0x0f,0x0b");
                 }
             if (auto *IB = dyn_cast<IndirectBrInst>(&I)) {
                 ++indirects;
@@ -8207,15 +8212,24 @@ join:
     CHECK(hasIntToPtr);
     CHECK(hasIndex);
     CHECK(hasAntiDisasmHop);
+    CHECK(hasMidInstructionHop);
     bool hasAsmBait = false;
+    bool hasAsmDesyncBait = false;
     for (Instruction &I : instructions(*Bait)) {
         if (auto *CB = dyn_cast<CallBase>(&I)) {
-            if (auto *Asm = dyn_cast<InlineAsm>(CB->getCalledOperand()))
-                hasAsmBait |= Asm->getAsmString().contains(
-                    ".byte 0xf3,0x0f,0x1e,0xfa");
+            if (auto *Asm = dyn_cast<InlineAsm>(CB->getCalledOperand())) {
+                StringRef S = Asm->getAsmString();
+                hasAsmBait |=
+                    S.contains(".byte 0xf3,0x0f,0x1e,0xfa");
+                hasAsmDesyncBait |=
+                    S.contains(".byte 0xe9,0x44,0x33,0x22,0x11") &&
+                    S.contains(".byte 0x0f,0x85") &&
+                    S.contains(".byte 0xc3,0x90,0x0f,0x0b");
+            }
         }
     }
     CHECK(hasAsmBait);
+    CHECK(hasAsmDesyncBait);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 

@@ -1005,16 +1005,21 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   combines goto-spaghetti CFG pressure with alias/lvar recovery pressure.
 - Each rewritten site also emits a side-effecting anti-disassembly hop before
   the computed branch.  x86/x86_64 sites use `call`/`pop` to recover PIC state,
-  derive a local label, and `jmp *reg` over fake call/ret/trap bytes; AArch64
-  sites use `adr` plus `br x16` over fake branch/return words.  Together with
-  the existing signal/exception control-flow handlers, this covers the
-  signal-as-goto/PIC/computed-jump anti-disasm pattern without a new preset knob.
+  derive a local label, and `jmp *reg` into the displacement bytes of a fake
+  long conditional branch before skipping ret/trap bait.  The same sled also
+  leaves unconditional-jump junk bytes on the non-executed path.  AArch64 sites
+  use `adr` plus `br x16` over fake branch/trap/return words because fixed-width
+  aligned instructions cannot safely use x86-style mid-instruction targets.
+  Together with the existing signal/exception control-flow handlers, this covers
+  the signal-as-goto/PIC/computed-jump anti-disasm pattern without a new preset
+  knob.
 - When the transform fires on x86/x86_64/aarch64, the module also retains a
   cold local `morok.micro.analysis.bait` byte-sled helper.  Its inline-asm body
-  immediately jumps over bogus landing/prologue/epilogue bytes (`endbr64` on
-  x86_64, prologue-looking frame setup, fake `ret`), so normal execution is
-  unchanged while linear sweep and auto-function discovery see plausible but
-  unreachable function boundaries.
+  immediately jumps into the displacement bytes of an unreachable fake branch,
+  then jumps over bogus landing/prologue/epilogue bytes (`endbr64` on x86_64,
+  prologue-looking frame setup, fake `ret`), so normal execution is unchanged
+  while linear sweep and auto-function discovery see plausible but unreachable
+  function boundaries.
 - Scheduler placement is after TraceKeying and DispatcherlessRouting and before
   checksum/integrity fusion.  Earlier CFG transforms see ordinary structure;
   later integrity passes can hash/fuse the final microcode-stress shape.
