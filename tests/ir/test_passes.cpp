@@ -228,6 +228,20 @@ bool hasInlineAsmCall(Function &F) {
     return false;
 }
 
+bool hasCallWithI32Arg0(Module &M, StringRef name, std::uint32_t value) {
+    for (Function &F : M)
+        if (!F.isDeclaration())
+            for (Instruction &I : instructions(F))
+                if (auto *CB = dyn_cast<CallBase>(&I))
+                    if (Function *Callee = CB->getCalledFunction())
+                        if (Callee->getName() == name && CB->arg_size() > 0)
+                            if (auto *CI =
+                                    dyn_cast<ConstantInt>(CB->getArgOperand(0)))
+                                if (CI->getZExtValue() == value)
+                                    return true;
+    return false;
+}
+
 bool hasReadableByteString(Module &M, StringRef needle) {
     for (GlobalVariable &GV : M.globals()) {
         if (!GV.hasInitializer())
@@ -8669,6 +8683,7 @@ entry:
     CHECK(countUserCallsTo(*M, "morok.antidbg.probe") >= 1u);
     CHECK(M->getFunction("ptrace") != nullptr);
     CHECK(M->getFunction("prctl") != nullptr);
+    CHECK(hasCallWithI32Arg0(*M, "prctl", 22u));
     CHECK(M->getFunction("pthread_create") != nullptr);
     CHECK(M->getFunction("pthread_detach") != nullptr);
     CHECK(M->getFunction("open") != nullptr);

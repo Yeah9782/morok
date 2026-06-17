@@ -973,7 +973,10 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   state word, platform-specific recheck helpers, pthread watchdogs where
   available, and once-gated randomized calls inserted into user functions so
   debugger evidence is sampled from both constructors and normal execution paths
-  without repeatedly running expensive probes in hot loops.
+  without repeatedly running expensive probes in hot loops.  On Linux, the
+  startup path also installs a seccomp-BPF filter that kills `ptrace` requests
+  other than Morok's own `PTRACE_TRACEME` re-arm and kills
+  `process_vm_readv`/`process_vm_writev` in the protected process lineage.
 - TimingOracle emits a private constructor helper that samples several short
   volatile spans with two clock sources.  x86 targets use serialized `rdtscp`
   paired with a raw OS clock; Darwin targets use `mach_absolute_time` and
