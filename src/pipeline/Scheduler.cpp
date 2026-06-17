@@ -81,6 +81,19 @@ constexpr std::uint64_t kExplosiveFunctionBlockLimit = 96;
 constexpr std::uint64_t kSensitiveFunctionInstLimit = 1600;
 constexpr std::uint64_t kSensitiveFunctionBlockLimit = 220;
 
+// Integrity passes (DFI, self-checksum, mutual-guard) are placed at the tail of
+// the per-function loop, so by the time they run the function has already been
+// grown by every structural/value-level pass ahead of them.  Gating them on the
+// generic growth/heavy budgets therefore made them silently skip on any
+// non-trivial function (the same body that was 400 instructions at loop entry is
+// past 2500 by the integrity stage).  They are checksum/guard transforms whose
+// cost scales with a fixed region size, not with the whole function, so they can
+// safely tolerate a much larger host than the growth-producing passes.  Give
+// them a dedicated, deliberately higher budget instead of loosening the shared
+// limits (which would also amplify split/bcf/flatten on huge functions).
+constexpr std::uint64_t kIntegrityFunctionInstLimit = 6000;
+constexpr std::uint64_t kIntegrityFunctionBlockLimit = 800;
+
 constexpr std::uint64_t kModuleGrowthInstLimit = 60000;
 constexpr std::uint64_t kModuleGrowthBlockLimit = 8000;
 constexpr std::uint64_t kModuleGrowthFunctionLimit = 1500;
@@ -141,6 +154,11 @@ bool explosiveFunctionOk(const Function &F) {
 bool sensitiveFunctionOk(const Function &F) {
     return withinFunctionBudget(F, kSensitiveFunctionInstLimit,
                                 kSensitiveFunctionBlockLimit);
+}
+
+bool integrityFunctionOk(const Function &F) {
+    return withinFunctionBudget(F, kIntegrityFunctionInstLimit,
+                                kIntegrityFunctionBlockLimit);
 }
 
 ModuleSize measureModule(const Module &M) {
@@ -606,7 +624,7 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
 
             // Integrity-bound byte tables consume selected byte ops before the
             // generic arithmetic table pass handles the remaining ones.
-            if (growthFunctionOk(F) &&
+            if (integrityFunctionOk(F) &&
                 ir::shouldObfuscate(
                     F, "dfi",
                     eff.data_flow_integrity.enabled.value_or(false))) {
@@ -734,7 +752,7 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
 
             // Feed a runtime checksum diff into constants as data, not a
             // branch.
-            if (growthFunctionOk(F) &&
+            if (integrityFunctionOk(F) &&
                 ir::shouldObfuscate(
                     F, "selfcheck",
                     eff.self_checksum.enabled.value_or(false))) {
@@ -748,7 +766,7 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
             // Overlap several checksum nodes and poison selected return values
             // with the aggregate graph diff.  Constant encryption can still
             // hide the literals introduced in the user function.
-            if (heavyFunctionOk(F) &&
+            if (integrityFunctionOk(F) &&
                 ir::shouldObfuscate(F, "mutualguard",
                                     eff.mutual_guard.enabled.value_or(false))) {
                 passes::MutualGuardGraphParams p;

@@ -5897,7 +5897,7 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_CASE("virtualizeModule skips unsupported control flow") {
+TEST_CASE("virtualizeModule lifts multi-block branching control flow") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
 define i32 @branchy(i32 %a, i32 %b, i1 %c) {
@@ -5912,13 +5912,208 @@ right:
     auto engine = morok::core::Xoshiro256pp::fromSeed(152);
     morok::ir::IRRandom rng(engine);
 
+    // A real CFG used to make the whole function ineligible (the old lifter
+    // required a single basic block).  It must now lift: branches become
+    // PC-jump opcodes over the dispatch loop.
+    CHECK(morok::passes::virtualizeModule(
+        *M,
+        {/*probability=*/100, /*max_functions=*/1,
+         /*max_instructions=*/64, /*max_registers=*/64},
+        rng));
+
+    Function *Helper = M->getFunction("morok.vm.branchy.exec");
+    REQUIRE(Helper);
+    CHECK(countGlobals(*M, "morok.vm.bytecode") == 1u);
+    CHECK(countGlobals(*M, "morok.vm.targets") == 1u);
+
+    Function *F = M->getFunction("branchy");
+    REQUIRE(F);
+    std::size_t wrapperCalls = 0;
+    std::size_t wrapperBranches = 0;
+    for (Instruction &I : instructions(*F)) {
+        wrapperCalls += isa<CallInst>(&I) ? 1u : 0u;
+        wrapperBranches += isa<BranchInst>(&I) ? 1u : 0u;
+    }
+    CHECK(wrapperCalls == 1u);
+    CHECK(wrapperBranches == 0u);
+
+    std::size_t indirects = 0;
+    std::size_t switches = 0;
+    bool hasBranchHandler = false;
+    for (BasicBlock &BB : *Helper) {
+        hasBranchHandler |= BB.getName().starts_with("morok.vm.h.br");
+        for (Instruction &I : BB) {
+            indirects += isa<IndirectBrInst>(&I) ? 1u : 0u;
+            switches += isa<SwitchInst>(&I) ? 1u : 0u;
+        }
+    }
+    CHECK(indirects == 1u);
+    CHECK(switches == 0u);
+    CHECK(hasBranchHandler);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("virtualizeModule lifts a counted loop with phi nodes") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @loopsum(i32 %n) {
+entry:
+  br label %head
+head:
+  %i = phi i32 [ 0, %entry ], [ %i2, %body ]
+  %acc = phi i32 [ 0, %entry ], [ %acc2, %body ]
+  %cond = icmp slt i32 %i, %n
+  br i1 %cond, label %body, label %done
+body:
+  %acc2 = add i32 %acc, %i
+  %i2 = add i32 %i, 1
+  br label %head
+done:
+  ret i32 %acc
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(8101);
+    morok::ir::IRRandom rng(engine);
+
+    // PHIs + a back-edge: de-SSA via demoteToStack removes the phis, and the
+    // back-edge falls out of the writable PC for free.
+    CHECK(morok::passes::virtualizeModule(
+        *M,
+        {/*probability=*/100, /*max_functions=*/1,
+         /*max_instructions=*/128, /*max_registers=*/96},
+        rng));
+
+    Function *Helper = M->getFunction("morok.vm.loopsum.exec");
+    REQUIRE(Helper);
+    CHECK(countGlobals(*M, "morok.vm.bytecode") == 1u);
+
+    Function *F = M->getFunction("loopsum");
+    REQUIRE(F);
+    std::size_t wrapperPhis = 0;
+    std::size_t wrapperCalls = 0;
+    for (Instruction &I : instructions(*F)) {
+        wrapperPhis += isa<PHINode>(&I) ? 1u : 0u;
+        wrapperCalls += isa<CallInst>(&I) ? 1u : 0u;
+    }
+    CHECK(wrapperPhis == 0u);
+    CHECK(wrapperCalls == 1u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("virtualizeModule lifts memory access, alloca, and getelementptr") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @memsum(ptr %p, i32 %n) {
+entry:
+  %slot = alloca i32
+  store i32 0, ptr %slot
+  br label %head
+head:
+  %i = phi i32 [ 0, %entry ], [ %i2, %body ]
+  %cond = icmp slt i32 %i, %n
+  br i1 %cond, label %body, label %done
+body:
+  %ep = getelementptr inbounds i32, ptr %p, i32 %i
+  %v = load i32, ptr %ep
+  %acc = load i32, ptr %slot
+  %acc2 = add i32 %acc, %v
+  store i32 %acc2, ptr %slot
+  %i2 = add i32 %i, 1
+  br label %head
+done:
+  %r = load i32, ptr %slot
+  ret i32 %r
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(8102);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::virtualizeModule(
+        *M,
+        {/*probability=*/100, /*max_functions=*/1,
+         /*max_instructions=*/192, /*max_registers=*/128},
+        rng));
+
+    Function *Helper = M->getFunction("morok.vm.memsum.exec");
+    REQUIRE(Helper);
+    CHECK(countGlobals(*M, "morok.vm.bytecode") == 1u);
+
+    bool hasLoadHandler = false;
+    bool hasStoreHandler = false;
+    bool helperHasArena = false;
+    for (BasicBlock &BB : *Helper) {
+        hasLoadHandler |= BB.getName().starts_with("morok.vm.h.load");
+        hasStoreHandler |= BB.getName().starts_with("morok.vm.h.store");
+        for (Instruction &I : BB)
+            helperHasArena |= isa<AllocaInst>(&I) &&
+                              I.getName().starts_with("morok.vm.arena");
+    }
+    CHECK(hasLoadHandler);
+    CHECK(hasStoreHandler);
+    CHECK(helperHasArena);
+
+    Function *F = M->getFunction("memsum");
+    REQUIRE(F);
+    std::size_t wrapperMem = 0;
+    for (Instruction &I : instructions(*F))
+        wrapperMem += (isa<LoadInst>(&I) || isa<StoreInst>(&I) ||
+                       isa<GetElementPtrInst>(&I))
+                          ? 1u
+                          : 0u;
+    CHECK(wrapperMem == 0u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("virtualizeModule lifts pointer-argument and void-return functions") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define void @store_pair(ptr %p, i32 %a, i32 %b) {
+entry:
+  store i32 %a, ptr %p
+  %q = getelementptr inbounds i32, ptr %p, i64 1
+  store i32 %b, ptr %q
+  ret void
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(8103);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::virtualizeModule(
+        *M,
+        {/*probability=*/100, /*max_functions=*/1,
+         /*max_instructions=*/64, /*max_registers=*/64},
+        rng));
+
+    Function *Helper = M->getFunction("morok.vm.store_pair.exec");
+    REQUIRE(Helper);
+    CHECK(Helper->getReturnType()->isVoidTy());
+    CHECK(countGlobals(*M, "morok.vm.bytecode") == 1u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("virtualizeModule skips functions that call other functions") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+declare i32 @ext(i32)
+
+define i32 @uses_call(i32 %a) {
+entry:
+  %r = call i32 @ext(i32 %a)
+  ret i32 %r
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(152);
+    morok::ir::IRRandom rng(engine);
+
+    // Calls are deliberately gated out (the call-ABI surface is a separate
+    // follow-up); the function must be cleanly rejected with no partial output.
     CHECK_FALSE(morok::passes::virtualizeModule(
         *M,
         {/*probability=*/100, /*max_functions=*/1,
          /*max_instructions=*/16, /*max_registers=*/32},
         rng));
     CHECK(countGlobals(*M, "morok.vm.bytecode") == 0u);
-    CHECK(M->getFunction("morok.vm.branchy.exec") == nullptr);
+    CHECK(M->getFunction("morok.vm.uses_call.exec") == nullptr);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
@@ -8872,7 +9067,7 @@ TEST_CASE("stringEncryptModule gives each string its own cipher") {
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_CASE("functionCallObfuscateModule redirects an external call via dlsym") {
+TEST_CASE("functionCallObfuscateModule redirects a Linux external call via hash resolver") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
 declare i32 @puts(ptr)
@@ -8886,7 +9081,9 @@ define i32 @caller() {
     auto engine = morok::core::Xoshiro256pp::fromSeed(27);
     morok::ir::IRRandom rng(engine);
     CHECK(morok::passes::functionCallObfuscateModule(*M, {/*prob=*/100}, rng));
-    CHECK(M->getFunction("dlsym") != nullptr);
+    CHECK(M->getFunction("dlsym") == nullptr);
+    CHECK(M->getFunction("morok.fco.resolve.elf") != nullptr);
+    CHECK(M->getFunction("morok.fco.resolve.elf.module") != nullptr);
     Function *Caller = M->getFunction("caller");
     REQUIRE(Caller);
     CHECK(hasInlineAsmCall(*Caller));
@@ -8980,28 +9177,25 @@ define i32 @caller() {
             if (CDA->getElementType()->isIntegerTy(8))
                 CHECK(CDA->getRawDataValues().find("puts") == StringRef::npos);
     }
-    // A per-site cipher global and the volatile module seed exist.
-    CHECK(countGlobals(*M, "morok.cloak.c") == 1u);
-    CHECK(countGlobals(*M, "morok.cloak.seed") == 1u);
+    // Linux/manual resolution uses only a per-site hash: no API-name cloak global
+    // or shared dlsym string path is needed for the target symbol.
+    CHECK(countGlobals(*M, "morok.cloak.c") == 0u);
 
-    // The seed is read with a volatile load, and the symbol passed to dlsym is
-    // a computed stack pointer (an alloca), not a direct global string.
+    // The caller publishes only a pending hash/out/continuation request before
+    // faulting; the handler only resumes the continuation, then the callsite
+    // resolves by hash outside the signal context. dlsym never appears.
     Function *Caller = M->getFunction("caller");
     REQUIRE(Caller);
-    bool hasVolatileLoad = false;
-    bool pendingNameFromAlloca = false;
+    bool storesPendingHash = false;
     bool hasFaultAsm = false;
     bool indirectUsesDecodedPointer = false;
-    GlobalVariable *PendingName =
-        M->getGlobalVariable("morok.fco.ex.pending.name", true);
-    REQUIRE(PendingName);
+    GlobalVariable *PendingHash =
+        M->getGlobalVariable("morok.fco.ex.pending.hash", true);
+    REQUIRE(PendingHash);
     for (Instruction &I : instructions(*Caller)) {
-        if (auto *LI = dyn_cast<LoadInst>(&I))
-            hasVolatileLoad |= LI->isVolatile();
         if (auto *SI = dyn_cast<StoreInst>(&I))
-            if (SI->getPointerOperand()->stripPointerCasts() == PendingName)
-                pendingNameFromAlloca |= isa<AllocaInst>(
-                    SI->getValueOperand()->stripInBoundsOffsets());
+            storesPendingHash |=
+                SI->getPointerOperand()->stripPointerCasts() == PendingHash;
         if (auto *CI = dyn_cast<CallInst>(&I)) {
             if (Function *Cee = CI->getCalledFunction()) {
                 (void)Cee;
@@ -9017,25 +9211,28 @@ define i32 @caller() {
     }
     Function *Handler = M->getFunction("morok.fco.ex.handler");
     REQUIRE(Handler);
-    CHECK(countCallsTo(*Handler, "dlsym") == 1u);
-    CHECK(M->getFunction("morok.fco.ex.install") != nullptr);
+    CHECK(M->getFunction("dlsym") == nullptr);
+    CHECK(countCallsTo(*Handler, "morok.fco.resolve.elf") == 0u);
+    CHECK(countCallsTo(*Caller, "morok.fco.resolve.elf") == 1u);
+    Function *Install = M->getFunction("morok.fco.ex.install");
+    REQUIRE(Install);
+    CHECK(countCallsTo(*Install, "morok.fco.resolve.elf") == 0u);
     CHECK(M->getGlobalVariable("morok.fco.ex.pending.hash", true) != nullptr);
+    CHECK(M->getGlobalVariable("morok.fco.ex.pending.name", true) != nullptr);
     CHECK(M->getGlobalVariable("morok.fco.ex.pending.out", true) != nullptr);
     CHECK(M->getGlobalVariable("morok.fco.ex.pending.cont", true) != nullptr);
-    CHECK(countNamedInstructions(*Handler, "morok.fco.ex.hash") >= 1u);
-    CHECK(hasVolatileLoad);
-    CHECK(pendingNameFromAlloca);
+    CHECK(storesPendingHash);
     CHECK(hasFaultAsm);
     CHECK(indirectUsesDecodedPointer);
-    CHECK(countInlineAsmCalls(*Caller) >= 2u);
-    CHECK(countNamedAllocas(*Caller, "morok.cloak.mix") >= 1u);
+    CHECK(countInlineAsmCalls(*Caller) >= 1u);
+    CHECK(countNamedAllocas(*Caller, "morok.cloak.mix") == 0u);
     CHECK(countNamedAllocas(*Caller, "morok.fco.ptr.slot") == 1u);
     CHECK(countNamedAllocas(*Caller, "morok.fco.ex.slot") == 1u);
     CHECK(countNamedInstructions(*Caller, "morok.fco.ptr.enc") >= 1u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_CASE("functionCallObfuscateModule strips the asm-name escape for dlsym") {
+TEST_CASE("functionCallObfuscateModule uses Mach-O hash resolver for asm names") {
     LLVMContext ctx;
     // macOS libc symbols carry a `\01`-escaped asm name (`\01_fwrite`); dlsym
     // needs the plain C name "fwrite", else it returns null and the redirected
@@ -9053,15 +9250,12 @@ define i64 @caller(ptr %f) {
     morok::ir::IRRandom rng(engine);
     CHECK(morok::passes::functionCallObfuscateModule(*M, {/*prob=*/100}, rng));
 
-    // The cloaked symbol must be the plain C name "fwrite" (6 + NUL = 7 bytes),
-    // not the raw "\01_fwrite" (10 bytes).
-    bool hasStrippedCipher = false;
-    for (GlobalVariable &GV : M->globals())
-        if (GV.getName().starts_with("morok.cloak.c"))
-            if (auto *AT = dyn_cast<ArrayType>(GV.getValueType()))
-                hasStrippedCipher |= AT->getNumElements() == 7u;
-    CHECK(hasStrippedCipher);
-    CHECK(M->getFunction("dlsym") != nullptr);
+    CHECK(countGlobals(*M, "morok.cloak.c") == 0u);
+    CHECK(M->getFunction("dlsym") == nullptr);
+    CHECK(M->getFunction("morok.fco.resolve.macho") != nullptr);
+    Function *Caller = M->getFunction("caller");
+    REQUIRE(Caller);
+    CHECK(countCallsTo(*Caller, "morok.fco.resolve.macho") == 1u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 

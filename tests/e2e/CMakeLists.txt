@@ -95,6 +95,27 @@ set_tests_properties("e2e/differential_maxtoml" PROPERTIES
   LABELS "e2e;max"
   REQUIRED_FILES "$<TARGET_FILE:morok_plugin>;${_maxcfg_setting}")
 
+# Virtualization-specific differential gate.  Asserts the bytecode VM actually
+# lifted at least one function (catches a silent "lifts nothing" regression, the
+# failure that motivated the multi-block expansion) in addition to clean-vs-
+# obfuscated output equality.  Apple-only: the VM's indirectbr/blockaddress
+# dispatch still crashes the x86 backend on some inputs (see vm.toml /
+# portable.toml), so it is exercised only where it is correct today.
+if(APPLE)
+  add_test(NAME "e2e/differential_vm"
+    COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/differential_vm.sh"
+            "${CMAKE_C_COMPILER}"
+            "$<TARGET_FILE:morok_plugin>"
+            "${_sysroot}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/vm_workload.c"
+            "${CMAKE_CURRENT_SOURCE_DIR}/vm.toml"
+            4242)
+  set_tests_properties("e2e/differential_vm" PROPERTIES
+    LABELS "e2e;max"
+    REQUIRED_FILES
+      "$<TARGET_FILE:morok_plugin>;${CMAKE_CURRENT_SOURCE_DIR}/vm.toml")
+endif()
+
 # The full sample-program compile sweep runs only when the corpus is present.
 # `programs/` lives outside version control (it carries arch/OS-specific
 # workloads — aarch64 inline asm, raw syscalls — that do not compile on every

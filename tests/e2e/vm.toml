@@ -1,0 +1,23 @@
+# Virtualization-focused e2e config: only the bytecode VM and its hash-gated
+# self-decrypt layer, isolated from the rest of the pipeline so the differential
+# gate exercises (and regresses) the lifter specifically.
+#
+# Apple-only by construction: the VM's indirectbr/blockaddress dispatch still
+# crashes the x86 backend on some inputs (see tests/e2e/portable.toml and the
+# note in src/config/Preset.cpp), so the gate that uses this config is wired up
+# only on APPLE in tests/e2e/CMakeLists.txt.
+
+[global]
+preset = "none"
+
+[passes.virtualization]
+enabled = true
+probability = 100
+max_functions = 16
+max_instructions = 4096
+max_registers = 200
+
+[passes.hash_gated_self_decrypt]
+enabled = true
+probability = 100
+max_payloads = 16
