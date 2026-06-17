@@ -236,6 +236,10 @@ PassPluginLibraryInfo getPluginInfo() {
                             MPM.addPass(passes::WindowsPEFoundationPass());
                             return true;
                         }
+                        if (name == "morok-winpeb") {
+                            MPM.addPass(passes::WindowsPebHeapDebugPass());
+                            return true;
+                        }
                         if (name == "morok-timing") {
                             MPM.addPass(passes::TimingOraclePass());
                             return true;

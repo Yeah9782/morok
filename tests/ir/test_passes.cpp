@@ -10593,6 +10593,41 @@ define i32 @main() { ret i32 0 }
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("windowsPebHeapDebugModule emits direct PEB and heap checks") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-pc-windows-msvc"
+define i32 @main() { ret i32 0 }
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(9107);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::windowsPebHeapDebugModule(*M, rng));
+
+    Function *Ctor = M->getFunction("morok.win.pebheap");
+    Function *Probe = M->getFunction("morok.win.pebheap.probe");
+    Function *Peb = M->getFunction("morok.win.peb");
+    REQUIRE(Ctor != nullptr);
+    REQUIRE(Probe != nullptr);
+    REQUIRE(Peb != nullptr);
+    CHECK(M->getGlobalVariable("morok.win.state", true) != nullptr);
+    CHECK(hasInlineAsmCall(*Peb));
+    CHECK(countNamedInstructions(*Probe, "morok.win.pebheap.peb") >= 1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.win.pebheap.being.debugged") >= 1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.win.pebheap.nt.global.flag") >= 1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.win.pebheap.process.heap") >= 1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.pebheap.heap.flags") >=
+          1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.win.pebheap.heap.force.flags") >= 1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.win.pebheap.heap.composite") >= 1u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("timingOracleModule emits x86 rdtscp and raw clock probes") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(

@@ -208,6 +208,7 @@ TEST_CASE("merge handles every pass family") {
     src.fco.enabled = true;
     src.anti_dbg.enabled = true;
     src.windows_pe_foundation.enabled = true;
+    src.windows_peb_heap_debug.enabled = true;
     src.timing_oracles.enabled = true;
     src.trap_oracles.enabled = true;
     src.page_fault_oracles.enabled = true;
@@ -358,6 +359,7 @@ TEST_CASE("merge handles every pass family") {
     CHECK(dst.fco.enabled == true);
     CHECK(dst.anti_dbg.enabled == true);
     CHECK(dst.windows_pe_foundation.enabled == true);
+    CHECK(dst.windows_peb_heap_debug.enabled == true);
     CHECK(dst.timing_oracles.enabled == true);
     CHECK(dst.trap_oracles.enabled == true);
     CHECK(dst.page_fault_oracles.enabled == true);

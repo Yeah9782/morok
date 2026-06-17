@@ -8317,6 +8317,106 @@ Function *windowsPeFoundationProbe(Module &M, GlobalVariable *State,
     return fn;
 }
 
+Function *windowsPebHeapDebugProbe(Module &M, GlobalVariable *State,
+                                   ir::IRRandom &rng, const Triple &TT) {
+    if (!TT.isOSWindows() || TT.getArch() != Triple::x86_64 ||
+        intPtrTy(M)->getBitWidth() != 64)
+        return nullptr;
+    if (Function *existing = M.getFunction("morok.win.pebheap.probe"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+    auto *fn = Function::Create(FunctionType::get(Type::getVoidTy(ctx), false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.win.pebheap.probe", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+
+    Function *pebReader = windowsPebReader(M);
+    if (!pebReader)
+        return nullptr;
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    auto *readPebBB = BasicBlock::Create(ctx, "read.peb", fn);
+    auto *readHeapBB = BasicBlock::Create(ctx, "read.heap", fn);
+    auto *retBB = BasicBlock::Create(ctx, "ret", fn);
+
+    IRBuilder<> B(entry);
+    Value *peb = B.CreateCall(pebReader, {}, "morok.win.pebheap.peb");
+    foldState(B, State, peb, rng.next(), "morok.win.pebheap.peb.mix");
+    B.CreateCondBr(B.CreateICmpNE(peb, ConstantInt::get(ip, 0),
+                                  "morok.win.pebheap.peb.present"),
+                   readPebBB, retBB);
+
+    IRBuilder<> PB(readPebBB);
+    Value *pebPtr = PB.CreateIntToPtr(peb, ptr, "morok.win.pebheap.peb.ptr");
+    Value *beingDebugged =
+        loadAt(PB, M, i8, pebPtr, 0x02, "morok.win.pebheap.being.debugged");
+    Value *ntGlobalFlag =
+        loadAt(PB, M, i32, pebPtr, 0xBC, "morok.win.pebheap.nt.global.flag");
+    Value *processHeap =
+        loadAt(PB, M, ip, pebPtr, 0x30, "morok.win.pebheap.process.heap");
+    foldState(PB, State, beingDebugged, rng.next(),
+              "morok.win.pebheap.being.debugged.mix");
+    foldState(PB, State, ntGlobalFlag, rng.next(),
+              "morok.win.pebheap.nt.global.flag.mix");
+    foldState(PB, State, processHeap, rng.next(),
+              "morok.win.pebheap.process.heap.mix");
+    foldFlag(PB, State,
+             PB.CreateICmpNE(beingDebugged, ConstantInt::get(i8, 0),
+                             "morok.win.pebheap.being.debugged.hit"),
+             0xBAE7D1C05A16E903ULL, "morok.win.pebheap.being.debugged");
+    Value *ntDebugBits =
+        PB.CreateAnd(ntGlobalFlag, ConstantInt::get(i32, 0x70),
+                     "morok.win.pebheap.nt.global.flag.bits");
+    foldFlag(PB, State,
+             PB.CreateICmpNE(ntDebugBits, ConstantInt::get(i32, 0),
+                             "morok.win.pebheap.nt.global.flag.hit"),
+             0xE43BC91F672A580DULL, "morok.win.pebheap.nt.global.flag");
+    PB.CreateCondBr(PB.CreateICmpNE(processHeap, ConstantInt::get(ip, 0),
+                                    "morok.win.pebheap.heap.present"),
+                    readHeapBB, retBB);
+
+    IRBuilder<> HB(readHeapBB);
+    Value *heapPtr =
+        HB.CreateIntToPtr(processHeap, ptr, "morok.win.pebheap.heap.ptr");
+    Value *heapFlags =
+        loadAt(HB, M, i32, heapPtr, 0x70, "morok.win.pebheap.heap.flags");
+    Value *heapForceFlags = loadAt(HB, M, i32, heapPtr, 0x74,
+                                   "morok.win.pebheap.heap.force.flags");
+    foldState(HB, State, heapFlags, rng.next(),
+              "morok.win.pebheap.heap.flags.mix");
+    foldState(HB, State, heapForceFlags, rng.next(),
+              "morok.win.pebheap.heap.force.flags.mix");
+    Value *heapDebugBits =
+        HB.CreateAnd(heapFlags, ConstantInt::get(i32, 0x40000060),
+                     "morok.win.pebheap.heap.flags.debug.bits");
+    foldFlag(HB, State,
+             HB.CreateICmpNE(heapDebugBits, ConstantInt::get(i32, 0),
+                             "morok.win.pebheap.heap.flags.hit"),
+             0x6A278C0D4E95B1F3ULL, "morok.win.pebheap.heap.flags");
+    foldFlag(HB, State,
+             HB.CreateICmpNE(heapForceFlags, ConstantInt::get(i32, 0),
+                             "morok.win.pebheap.heap.force.flags.hit"),
+             0x91D630A24CFB5875ULL, "morok.win.pebheap.heap.force.flags");
+    Value *heapVsPeb =
+        HB.CreateOr(HB.CreateZExt(heapDebugBits, ip),
+                    HB.CreateShl(HB.CreateZExt(heapForceFlags, ip),
+                                 ConstantInt::get(ip, 32)),
+                    "morok.win.pebheap.heap.composite");
+    foldState(HB, State, heapVsPeb, rng.next(),
+              "morok.win.pebheap.heap.composite.mix");
+    HB.CreateBr(retBB);
+
+    IRBuilder<> RB(retBB);
+    RB.CreateRetVoid();
+    return fn;
+}
+
 } // namespace
 
 bool antiDebuggingModule(Module &M, ir::IRRandom &rng, bool AllowSelfTrace) {
@@ -8758,6 +8858,21 @@ bool windowsPeFoundationModule(Module &M, ir::IRRandom &rng) {
     return true;
 }
 
+bool windowsPebHeapDebugModule(Module &M, ir::IRRandom &rng) {
+    const Triple tt(M.getTargetTriple());
+    GlobalVariable *state = windowsPeState(M, rng);
+    Function *probe = windowsPebHeapDebugProbe(M, state, rng, tt);
+    if (!probe)
+        return false;
+
+    Function *ctor = makeCtorShell(M, "morok.win.pebheap");
+    IRBuilder<> B(&ctor->getEntryBlock());
+    B.CreateCall(probe);
+    B.CreateRetVoid();
+    appendToGlobalCtors(M, ctor, 0);
+    return true;
+}
+
 PreservedAnalyses AntiDebuggingPass::run(Module &M, ModuleAnalysisManager &) {
     ir::IRRandom rng(engine_);
     return antiDebuggingModule(M, rng) ? PreservedAnalyses::none()
@@ -8777,6 +8892,13 @@ PreservedAnalyses WindowsPEFoundationPass::run(Module &M,
                                                ModuleAnalysisManager &) {
     ir::IRRandom rng(engine_);
     return windowsPeFoundationModule(M, rng) ? PreservedAnalyses::none()
+                                             : PreservedAnalyses::all();
+}
+
+PreservedAnalyses WindowsPebHeapDebugPass::run(Module &M,
+                                               ModuleAnalysisManager &) {
+    ir::IRRandom rng(engine_);
+    return windowsPebHeapDebugModule(M, rng) ? PreservedAnalyses::none()
                                              : PreservedAnalyses::all();
 }
 

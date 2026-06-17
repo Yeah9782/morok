@@ -10,6 +10,7 @@
 //   • AntiHooking    — checks a function prologue for inline-hook trampolines.
 //   • AntiClassDump  — scrambles Objective-C metadata (no-op on non-ObjC code).
 //   • WindowsPEFoundation — emits reusable Windows PEB/TEB, PE, syscall, VEH helpers.
+//   • WindowsPebHeapDebug — samples Windows PEB/heap debug fields directly.
 //   • TimingOracle   — samples independent clocks around short spans.
 //   • TrapOracle     — checks whether SIGTRAP/int3-style traps reach the app.
 //   • PageFaultTlbOracle — samples protected-page fault delivery and latency.
@@ -57,6 +58,12 @@ bool antiClassDumpModule(llvm::Module &M);
 /// syscall-stub scanning/dispatch scaffolding, and VEH registration.  Returns
 /// true if code was added for the target.
 bool windowsPeFoundationModule(llvm::Module &M, morok::ir::IRRandom &rng);
+
+/// Inject Windows x86_64 PEB/heap debug-structure checks.  The emitted startup
+/// probe reads PEB.BeingDebugged, PEB.NtGlobalFlag, ProcessHeap, and heap
+/// Flags/ForceFlags through GS-derived PEB state without calling hooked APIs.
+/// Returns true if code was added for the target.
+bool windowsPebHeapDebugModule(llvm::Module &M, morok::ir::IRRandom &rng);
 
 /// Inject a runtime timing oracle.  The emitted helper samples independent
 /// clocks around short deterministic spans and folds distribution-level
@@ -121,6 +128,19 @@ class WindowsPEFoundationPass
     : public llvm::PassInfoMixin<WindowsPEFoundationPass> {
 public:
     explicit WindowsPEFoundationPass(std::uint64_t seed = 0x51D0BEEF)
+        : engine_(core::Xoshiro256pp::fromSeed(seed)) {}
+
+    llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &);
+    static bool isRequired() { return true; }
+
+private:
+    core::Xoshiro256pp engine_;
+};
+
+class WindowsPebHeapDebugPass
+    : public llvm::PassInfoMixin<WindowsPebHeapDebugPass> {
+public:
+    explicit WindowsPebHeapDebugPass(std::uint64_t seed = 0x5EA1B0A7u)
         : engine_(core::Xoshiro256pp::fromSeed(seed)) {}
 
     llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &);
