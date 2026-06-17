@@ -995,6 +995,11 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   and mapping path; macOS x86_64 uses inline Darwin BSD syscalls for
   `open`/`lseek`/`mmap`/`munmap`/`close` and avoids adding the legacy `dlsym`
   anti-hook probe on Darwin.
+  AntiHooking also samples prologues from a bounded set of user functions plus
+  the generated clean-copy helper.  x86 targets fold `E9`, `FF 25`, `68 .. C3`,
+  `EB`, and short/near `jcc` entry patterns into anti-hook state; arm64 targets
+  fold unconditional branch, `br`, and `ldr literal x16/x17; br` trampoline
+  shapes.
 - TimingOracle emits a private constructor helper that samples several short
   volatile spans with two clock sources.  x86 targets use serialized `rdtscp`
   paired with a raw OS clock; Darwin targets use `mach_absolute_time` and

@@ -8663,6 +8663,8 @@ define i32 @main() { ret i32 0 }
     CHECK(M->getFunction("munmap") == nullptr);
     CHECK(M->getFunction("close") == nullptr);
     CHECK(M->getFunction("syscall") == nullptr);
+    CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
+                                 "morok.antihook.prologue.x86.hit") >= 1u);
     CHECK_FALSE(hasReadableByteString(*M, "/proc/self/exe"));
     CHECK_FALSE(hasReadableByteString(*M, "MSHookFunction"));
     CHECK_FALSE(verifyModule(*M, &errs()));
@@ -8690,9 +8692,41 @@ define i32 @main() { ret i32 0 }
     CHECK(M->getFunction("munmap") == nullptr);
     CHECK(M->getFunction("close") == nullptr);
     CHECK(M->getFunction("syscall") == nullptr);
+    CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
+                                 "morok.antihook.prologue.x86.hit") >= 1u);
     CHECK(M->getFunction("_NSGetExecutablePath") != nullptr);
     CHECK(M->getFunction("_dyld_get_image_header") != nullptr);
     CHECK(M->getFunction("_dyld_get_image_vmaddr_slide") != nullptr);
+    CHECK_FALSE(hasReadableByteString(*M, "MSHookFunction"));
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("antiHookingModule emits arm64 prologue branch detector") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "arm64-apple-macosx13.0.0"
+define i32 @work(i32 %x) {
+entry:
+  %a = add i32 %x, 11
+  ret i32 %a
+}
+define i32 @main() {
+entry:
+  %v = call i32 @work(i32 2)
+  ret i32 %v
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(8803);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::antiHookingModule(*M, rng));
+
+    Function *Ctor = M->getFunction("morok.antihook");
+    REQUIRE(Ctor != nullptr);
+    CHECK(countNamedInstructions(*Ctor,
+                                 "morok.antihook.prologue.arm64.hit") >= 1u);
+    CHECK(M->getFunction("dlsym") == nullptr);
+    CHECK(M->getFunction("open") != nullptr);
     CHECK_FALSE(hasReadableByteString(*M, "MSHookFunction"));
     CHECK_FALSE(verifyModule(*M, &errs()));
 }

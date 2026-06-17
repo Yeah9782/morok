@@ -1717,6 +1717,120 @@ Function *cleanCopyProbe(Module &M, ir::IRRandom &rng, const Triple &TT) {
     return nullptr;
 }
 
+bool isPrologueProbeCandidate(Function &F) {
+    if (F.isDeclaration() || F.hasAvailableExternallyLinkage() ||
+        F.isIntrinsic() || F.empty())
+        return false;
+    if (F.getName().starts_with("morok.") || F.getName().starts_with("llvm."))
+        return false;
+    return true;
+}
+
+LoadInst *loadCodeByte(IRBuilder<> &B, Module &M, Value *Base,
+                       std::uint64_t Offset, const Twine &Name) {
+    auto *LI = loadUnaligned(
+        B, Type::getInt8Ty(M.getContext()),
+        gepI8(B, M, Base, constIp(M, Offset), Name + ".ptr"), Name);
+    LI->setVolatile(true);
+    return LI;
+}
+
+LoadInst *loadCodeWord(IRBuilder<> &B, Module &M, Value *Base,
+                       std::uint64_t Offset, const Twine &Name) {
+    auto *LI = loadUnaligned(
+        B, Type::getInt32Ty(M.getContext()),
+        gepI8(B, M, Base, constIp(M, Offset), Name + ".ptr"), Name);
+    LI->setVolatile(true);
+    return LI;
+}
+
+Value *byteInRange(IRBuilder<> &B, Value *Byte, std::uint8_t Lo,
+                   std::uint8_t Hi, const Twine &Name) {
+    auto *i8 = Type::getInt8Ty(B.getContext());
+    return B.CreateAnd(B.CreateICmpUGE(Byte, ConstantInt::get(i8, Lo)),
+                       B.CreateICmpULE(Byte, ConstantInt::get(i8, Hi)), Name);
+}
+
+Value *emitX86ProloguePattern(IRBuilder<> &B, Module &M, Function *Target) {
+    auto *i8 = Type::getInt8Ty(M.getContext());
+    Value *b0 = loadCodeByte(B, M, Target, 0, "morok.antihook.prologue.b0");
+    Value *b1 = loadCodeByte(B, M, Target, 1, "morok.antihook.prologue.b1");
+    Value *b5 = loadCodeByte(B, M, Target, 5, "morok.antihook.prologue.b5");
+
+    Value *relJmp = B.CreateICmpEQ(b0, ConstantInt::get(i8, 0xE9),
+                                   "morok.antihook.prologue.e9");
+    Value *ripJmp = B.CreateAnd(B.CreateICmpEQ(b0, ConstantInt::get(i8, 0xFF)),
+                                B.CreateICmpEQ(b1, ConstantInt::get(i8, 0x25)),
+                                "morok.antihook.prologue.ff25");
+    Value *pushRet = B.CreateAnd(B.CreateICmpEQ(b0, ConstantInt::get(i8, 0x68)),
+                                 B.CreateICmpEQ(b5, ConstantInt::get(i8, 0xC3)),
+                                 "morok.antihook.prologue.pushret");
+    Value *shortJmp = B.CreateICmpEQ(b0, ConstantInt::get(i8, 0xEB),
+                                     "morok.antihook.prologue.eb");
+    Value *shortJcc =
+        byteInRange(B, b0, 0x70, 0x7F, "morok.antihook.prologue.jcc8");
+    Value *nearJcc = B.CreateAnd(
+        B.CreateICmpEQ(b0, ConstantInt::get(i8, 0x0F)),
+        byteInRange(B, b1, 0x80, 0x8F, "morok.antihook.prologue.jcc32"),
+        "morok.antihook.prologue.0fjcc");
+
+    return B.CreateOr(
+        B.CreateOr(B.CreateOr(relJmp, ripJmp), B.CreateOr(pushRet, shortJmp)),
+        B.CreateOr(shortJcc, nearJcc), "morok.antihook.prologue.x86.hit");
+}
+
+Value *wordMaskEq(IRBuilder<> &B, Value *Word, std::uint32_t Mask,
+                  std::uint32_t Expected, const Twine &Name) {
+    auto *i32 = Type::getInt32Ty(B.getContext());
+    return B.CreateICmpEQ(B.CreateAnd(Word, ConstantInt::get(i32, Mask)),
+                          ConstantInt::get(i32, Expected), Name);
+}
+
+Value *emitArm64ProloguePattern(IRBuilder<> &B, Module &M, Function *Target) {
+    Value *w0 = loadCodeWord(B, M, Target, 0, "morok.antihook.prologue.w0");
+    Value *w1 = loadCodeWord(B, M, Target, 4, "morok.antihook.prologue.w1");
+
+    Value *branchImm = wordMaskEq(B, w0, 0xFC000000U, 0x14000000U,
+                                  "morok.antihook.prologue.arm64.b");
+    Value *branchReg = wordMaskEq(B, w0, 0xFFFFFC1FU, 0xD61F0000U,
+                                  "morok.antihook.prologue.arm64.br");
+    Value *literalX16OrX17 =
+        B.CreateAnd(wordMaskEq(B, w0, 0xFF000000U, 0x58000000U,
+                               "morok.antihook.prologue.arm64.ldr"),
+                    wordMaskEq(B, w0, 0x0000001EU, 0x00000010U,
+                               "morok.antihook.prologue.arm64.rt"));
+    Value *nextBranchReg = wordMaskEq(B, w1, 0xFFFFFC1FU, 0xD61F0000U,
+                                      "morok.antihook.prologue.arm64.nextbr");
+    Value *literalBranch = B.CreateAnd(literalX16OrX17, nextBranchReg,
+                                       "morok.antihook.prologue.arm64.ldrbr");
+
+    return B.CreateOr(B.CreateOr(branchImm, branchReg), literalBranch,
+                      "morok.antihook.prologue.arm64.hit");
+}
+
+void emitProloguePatternChecks(IRBuilder<> &B, Module &M, const Triple &TT,
+                               GlobalVariable *State,
+                               const std::vector<Function *> &Targets,
+                               ir::IRRandom &rng) {
+    if (Targets.empty())
+        return;
+
+    const bool x86 =
+        TT.getArch() == Triple::x86 || TT.getArch() == Triple::x86_64;
+    const bool arm64 =
+        TT.getArch() == Triple::aarch64 || TT.getArch() == Triple::aarch64_32;
+    if (!x86 && !arm64)
+        return;
+
+    std::uint32_t site = 1;
+    for (Function *target : Targets) {
+        Value *hit = x86 ? emitX86ProloguePattern(B, M, target)
+                         : emitArm64ProloguePattern(B, M, target);
+        foldFlag(B, State, hit, rng.next() ^ (0x9E3779B97F4A7C15ULL * site++),
+                 "morok.antihook.prologue");
+    }
+}
+
 Function *antiDebugProbe(Module &M, GlobalVariable *State, ir::IRRandom &rng,
                          const Triple &TT) {
     if (Function *existing = M.getFunction("morok.antidbg.probe"))
@@ -2203,6 +2317,16 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
     LLVMContext &ctx = M.getContext();
     auto *i32 = Type::getInt32Ty(ctx);
     auto *ptr = PointerType::getUnqual(ctx);
+    constexpr std::uint32_t kMaxPrologueTargets = 16;
+
+    std::vector<Function *> prologueTargets;
+    prologueTargets.reserve(kMaxPrologueTargets + 1);
+    for (Function &F : M) {
+        if (prologueTargets.size() >= kMaxPrologueTargets)
+            break;
+        if (isPrologueProbeCandidate(F))
+            prologueTargets.push_back(&F);
+    }
 
     Function *ctor = makeCtorShell(M, "morok.antihook");
     GlobalVariable *state = antiHookState(M, rng);
@@ -2215,7 +2339,9 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         foldFlag(B, state,
                  B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0)),
                  0x48C3F3A9127DE40BULL, "morok.antihook.clean.changed");
+        prologueTargets.push_back(clean);
     }
+    emitProloguePatternChecks(B, M, tt, state, prologueTargets, rng);
 
     if (tt.isOSDarwin()) {
         B.CreateRetVoid();
