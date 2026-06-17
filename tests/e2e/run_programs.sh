@@ -26,6 +26,20 @@ fi
 SYSROOT=()
 [ -n "$SDK" ] && SYSROOT=(-isysroot "$SDK")
 
+# Resolve a portable run-time limiter. GNU coreutils ships `timeout` (Linux);
+# Homebrew installs it as `gtimeout` (macOS); stock macOS has neither, so fall
+# back to running without a hard limit (ctest's per-test TIMEOUT still bounds
+# the whole test).  Without this, a missing `timeout` makes *both* clean and obf
+# runs emit an identical-looking shell error that, because the two call sites are
+# on different lines, diffs as a spurious mismatch on every program.
+if command -v timeout >/dev/null 2>&1; then _LIMIT=(timeout)
+elif command -v gtimeout >/dev/null 2>&1; then _LIMIT=(gtimeout)
+else _LIMIT=(); fi
+run_limited() { # <seconds> <cmd...>
+  local secs="$1"; shift
+  if [ "${#_LIMIT[@]}" -gt 0 ]; then "${_LIMIT[@]}" "$secs" "$@"; else "$@"; fi
+}
+
 MOROK=()
 if [ -f "$CFG" ]; then MOROK=(-mllvm -morok-config="$CFG"); else MOROK=(-mllvm -morok-preset="$CFG"); fi
 
@@ -64,8 +78,8 @@ for base in "${PROGRAMS[@]}"; do
         "$src" -o "$TMP/obf" >/dev/null 2>&1; then
     echo "FAIL obf-compile $base" >&2; fails=$((fails + 1)); continue; fi
 
-  a="$(timeout 30 "$TMP/clean" </dev/null 2>&1)"; ca=$?
-  b="$(timeout 60 "$TMP/obf"   </dev/null 2>&1)"; cb=$?
+  a="$(run_limited 30 "$TMP/clean" </dev/null 2>&1)"; ca=$?
+  b="$(run_limited 60 "$TMP/obf"   </dev/null 2>&1)"; cb=$?
   if [ "$ca" -ne "$cb" ]; then
     echo "FAIL exit-code $base (clean=$ca obf=$cb)" >&2; fails=$((fails + 1)); continue; fi
   if [ "$(printf '%s' "$a" | grep -vE "$NOISE")" != \
