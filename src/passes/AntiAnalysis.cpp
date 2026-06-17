@@ -196,6 +196,16 @@ FunctionCallee syscallDecl(Module &M) {
     return M.getOrInsertFunction("syscall", FunctionType::get(ip, {ip}, true));
 }
 
+FunctionCallee getpidDecl(Module &M) {
+    return M.getOrInsertFunction(
+        "getpid", FunctionType::get(Type::getInt32Ty(M.getContext()), false));
+}
+
+FunctionCallee getppidDecl(Module &M) {
+    return M.getOrInsertFunction(
+        "getppid", FunctionType::get(Type::getInt32Ty(M.getContext()), false));
+}
+
 Value *emitLinuxSyscall(IRBuilder<> &B, Module &M, const Triple &TT,
                         std::uint32_t Number,
                         std::initializer_list<Value *> Args) {
@@ -349,9 +359,7 @@ Value *emitDarwinGetpid(IRBuilder<> &B, Module &M, const Triple &TT) {
     auto *i32 = Type::getInt32Ty(M.getContext());
     if (useDirectDarwinSyscalls(TT))
         return B.CreateTruncOrBitCast(emitDarwinSyscall(B, M, TT, 20, {}), i32);
-    FunctionCallee getpid =
-        M.getOrInsertFunction("getpid", FunctionType::get(i32, false));
-    return B.CreateCall(getpid);
+    return B.CreateCall(getpidDecl(M));
 }
 
 Value *emitDarwinPtrace(IRBuilder<> &B, Module &M, const Triple &TT,
@@ -4296,6 +4304,51 @@ bool insertStackOriginChecks(Module &M, Function *Check, GlobalVariable *State,
     return changed;
 }
 
+Value *emitWrapperPid(IRBuilder<> &B, Module &M, FunctionCallee Callee,
+                      const Twine &Name) {
+    return B.CreateSExtOrTrunc(B.CreateCall(Callee), intPtrTy(M), Name);
+}
+
+Function *methodDivergenceProbe(Module &M, const Triple &TT) {
+    const bool linux = useDirectLinuxSyscalls(TT);
+    const bool darwin = useDirectDarwinSyscalls(TT);
+    if (!linux && !darwin)
+        return nullptr;
+    if (Function *existing = M.getFunction("morok.antihook.diverge.posix"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *fn = Function::Create(FunctionType::get(i64, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antihook.diverge.posix", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    IRBuilder<> B(entry);
+    AllocaInst *diff =
+        B.CreateAlloca(i64, nullptr, "morok.antihook.diverge.diff");
+    B.CreateStore(ConstantInt::get(i64, 0), diff)->setVolatile(true);
+
+    auto comparePidPrimitive = [&](StringRef Stem, std::uint32_t SysNo,
+                                   FunctionCallee Wrapper) {
+        Value *direct = linux ? emitLinuxSyscall(B, M, TT, SysNo, {})
+                              : emitDarwinSyscall(B, M, TT, SysNo, {});
+        direct->setName(Twine("morok.antihook.diverge.") + Stem + ".direct");
+        Value *wrapped = emitWrapperPid(
+            B, M, Wrapper,
+            Twine("morok.antihook.diverge.") + Stem + ".wrapper");
+        incrementDiff(B, diff, B.CreateICmpNE(direct, wrapped),
+                      Twine("morok.antihook.diverge.") + Stem);
+    };
+
+    comparePidPrimitive("getpid", linux ? 39 : 20, getpidDecl(M));
+    comparePidPrimitive("getppid", linux ? 110 : 39, getppidDecl(M));
+    emitRetDiff(B, diff);
+    return fn;
+}
+
 void emitProloguePatternChecks(IRBuilder<> &B, Module &M, const Triple &TT,
                                GlobalVariable *State,
                                const std::vector<Function *> &Targets,
@@ -4978,6 +5031,15 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         foldFlag(B, state,
                  B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0)),
                  0xA7815E3C49D206BFULL, "morok.antihook.census.changed");
+    }
+    if (Function *diverge = methodDivergenceProbe(M, tt)) {
+        Value *diff =
+            B.CreateCall(diverge, {}, "morok.antihook.diverge.diff");
+        foldState(B, state, diff, 0x2F8D6C1E9A7453B0ULL,
+                  "morok.antihook.diverge");
+        foldFlag(B, state,
+                 B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0)),
+                 0xC58E90A37B42D16FULL, "morok.antihook.diverge.changed");
     }
     insertStackOriginChecks(M, stackOriginCheck(M), state, prologueTargets, rng);
     emitProloguePatternChecks(B, M, tt, state, prologueTargets, rng);

@@ -1093,6 +1093,12 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   folded into anti-hook state at the protected function entry, so suspicious
   injected calls or DBI trampolines poison later state without a separable
   immediate branch.
+  On x86_64 POSIX targets, AntiHooking also emits a method-divergence oracle:
+  the helper samples stable process-identity primitives through both an inline
+  direct syscall path and the libc wrapper path, counts mismatches, and folds
+  any divergence into the same delayed anti-hook state.  This catches wrapper
+  hooks or syscall-path hooks without introducing a readable probe string or a
+  libc `syscall` import on the direct path.
 - TimingOracle emits a private constructor helper that samples several short
   volatile spans with two clock sources.  x86 targets use serialized `rdtscp`
   paired with a raw OS clock; Darwin targets use `mach_absolute_time` and

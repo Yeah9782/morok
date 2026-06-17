@@ -8915,6 +8915,8 @@ entry:
     REQUIRE(Wx != nullptr);
     Function *Stack = M->getFunction("morok.antihook.stack.linux");
     REQUIRE(Stack != nullptr);
+    Function *Diverge = M->getFunction("morok.antihook.diverge.posix");
+    REQUIRE(Diverge != nullptr);
     Function *Work = M->getFunction("work");
     REQUIRE(Work != nullptr);
     CHECK(M->getGlobalVariable("morok.antihook.state", true) != nullptr);
@@ -8933,6 +8935,8 @@ entry:
     CHECK(M->getFunction("mprotect") == nullptr);
     CHECK(M->getFunction("close") == nullptr);
     CHECK(M->getFunction("syscall") == nullptr);
+    CHECK(M->getFunction("getpid") != nullptr);
+    CHECK(M->getFunction("getppid") != nullptr);
     CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.mem.mix") >= 1u);
     CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.file.mix") >=
           1u);
@@ -8942,6 +8946,13 @@ entry:
     CHECK(countNamedInstructions(*Rx, "morok.antihook.got.map.seg.hit") >= 1u);
     CHECK(countNamedInstructions(*Wx, "morok.antihook.wxorx.mprotect") >= 1u);
     CHECK(countNamedInstructions(*Stack, "morok.antihook.stack.rx") >= 1u);
+    CHECK(hasInlineAsmCall(*Diverge));
+    CHECK(countNamedInstructions(*Diverge,
+                                 "morok.antihook.diverge.getpid.direct") >=
+          1u);
+    CHECK(countNamedInstructions(*Diverge,
+                                 "morok.antihook.diverge.getppid.wrapper") >=
+          1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.ra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.bad") >= 1u);
     CHECK(countNamedInstructions(*Maps, "morok.antihook.maps.rwx") >= 1u);
@@ -8989,6 +9000,8 @@ entry:
     REQUIRE(Wx != nullptr);
     Function *Stack = M->getFunction("morok.antihook.stack.darwin");
     REQUIRE(Stack != nullptr);
+    Function *Diverge = M->getFunction("morok.antihook.diverge.posix");
+    REQUIRE(Diverge != nullptr);
     Function *Work = M->getFunction("work");
     REQUIRE(Work != nullptr);
     CHECK(M->getGlobalVariable("morok.antihook.state", true) != nullptr);
@@ -9002,6 +9015,8 @@ entry:
     CHECK(M->getFunction("munmap") == nullptr);
     CHECK(M->getFunction("close") == nullptr);
     CHECK(M->getFunction("syscall") == nullptr);
+    CHECK(M->getFunction("getpid") != nullptr);
+    CHECK(M->getFunction("getppid") != nullptr);
     CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.mem.mix") >= 1u);
     CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.file.mix") >=
           1u);
@@ -9014,6 +9029,13 @@ entry:
           1u);
     CHECK(countNamedInstructions(*Wx, "morok.antihook.wxorx.mprotect") >= 1u);
     CHECK(countNamedInstructions(*Stack, "morok.antihook.stack.text") >= 1u);
+    CHECK(hasInlineAsmCall(*Diverge));
+    CHECK(countNamedInstructions(*Diverge,
+                                 "morok.antihook.diverge.getpid.direct") >=
+          1u);
+    CHECK(countNamedInstructions(*Diverge,
+                                 "morok.antihook.diverge.getppid.wrapper") >=
+          1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.ra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.bad") >= 1u);
     CHECK(countNamedInstructions(*Vm, "morok.antihook.vm.rwx") >= 1u);
@@ -9098,6 +9120,7 @@ entry:
     REQUIRE(Ctor != nullptr);
     CHECK(countNamedInstructions(*Ctor,
                                  "morok.antihook.prologue.arm64.hit") >= 1u);
+    CHECK(M->getFunction("morok.antihook.diverge.posix") == nullptr);
     CHECK(M->getFunction("dlsym") == nullptr);
     CHECK(M->getFunction("open") != nullptr);
     CHECK_FALSE(hasReadableByteString(*M, "MSHookFunction"));

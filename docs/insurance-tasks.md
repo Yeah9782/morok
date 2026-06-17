@@ -50,7 +50,7 @@ Tags: `[platform · extends <pass> | new]`. All `XL` Windows items presume the
 - [x] Address-space / module census: parse `/proc/self/maps` / `vm_region` / `VirtualQuery`, flag RWX or W^X-violating / `NOACCESS` / guard / unbacked pages, `.text` not RX, manually-mapped images absent from the loader list, and unexpected `LD_PRELOAD`/injected `.so` `[xplat · new]`
 - [x] Self-enforce W^X on own pages (`mprotect` to RX, ban RWX) `[xplat · new]`
 - [x] Call-stack origin validation at sensitive functions: every return frame must lie in a known module's executable range, never in private/unbacked RWX (defeats ROP / injected calls / DBI trampolines) `[xplat · new]`
-- [ ] Method-divergence oracle: call the same primitive two ways (direct syscall vs wrapper); divergent results ⇒ one path is hooked `[posix · new]`
+- [x] Method-divergence oracle: call the same primitive two ways (direct syscall vs wrapper); divergent results ⇒ one path is hooked `[posix · new]`
 - [ ] Guard-network topology: ensure overlapping checksum guards cover every byte under ≥k guards (Chang–Atallah) `[xplat · extends mutualguard]`
 - [ ] Oblivious hashing: hash the runtime value/branch trace of a computation (not static bytes) to detect semantic tampering and emulation `[xplat · extends tracekey]`
 - [ ] Functional entanglement — derive real runtime values (crypto keys, jump-table indices, S-box bytes, next-block decryption keys) **from** the checksum / DR-state / watchdog-liveness so there is no `jz` to NOP `[xplat · extends selfcheck/dfi]`
