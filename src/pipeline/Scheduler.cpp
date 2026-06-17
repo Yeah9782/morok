@@ -288,6 +288,27 @@ bool hardenSensitiveGeneratedFunctions(Module &M,
     return Changed;
 }
 
+bool virtualizeSensitiveGeneratedFunctions(Module &M,
+                                           const config::PassConfig &Config,
+                                           ir::IRRandom &Rng) {
+    if (!Config.virtualization.enabled.value_or(false))
+        return false;
+
+    passes::VirtualizationParams P;
+    P.probability = raised(Config.virtualization.probability.value_or(100),
+                           100, /*Sensitive=*/true);
+    P.max_functions = raised(Config.virtualization.max_functions.value_or(1),
+                             8, /*Sensitive=*/true);
+    P.max_instructions =
+        raised(Config.virtualization.max_instructions.value_or(64), 256,
+               /*Sensitive=*/true);
+    P.max_registers = raised(Config.virtualization.max_registers.value_or(96),
+                             160, /*Sensitive=*/true);
+    P.include_protection_helpers = true;
+    P.protection_helpers_only = true;
+    return passes::virtualizeModule(M, P, Rng);
+}
+
 } // namespace
 
 PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
@@ -308,6 +329,42 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
     const ModuleSize InitialSize = measureModule(M);
     const bool InitialModuleGrowthOk = moduleGrowthOk(InitialSize);
     bool changed = false;
+
+    // VM lifting runs FIRST, before any other obfuscation touches user code.
+    // The virtualizer only lifts pristine integer/pointer computation kernels;
+    // later passes rewrite those bodies in ways the bytecode cannot encode and
+    // would make them ineligible — decoy-string injection plants references to
+    // global string pointers (un-encodable as bytecode immediates), and the
+    // per-function loop's splitting/flattening reshapes the CFG.  Running the VM
+    // up front lets it claim the clean kernels; every later pass then layers on
+    // top of the resulting wrappers/helpers.  Hash-gated self-decrypt wraps
+    // this first wave of emitted bytecode, so it runs immediately after.  A
+    // later protection-helper-only VM pass covers generated checker helpers
+    // once the anti-analysis/integrity passes have emitted them.
+    if (InitialModuleGrowthOk &&
+        config_.passes.virtualization.enabled.value_or(false)) {
+        passes::VirtualizationParams p;
+        p.probability = config_.passes.virtualization.probability.value_or(20);
+        p.max_functions =
+            config_.passes.virtualization.max_functions.value_or(1);
+        p.max_instructions =
+            config_.passes.virtualization.max_instructions.value_or(64);
+        p.max_registers =
+            config_.passes.virtualization.max_registers.value_or(96);
+        changed |= passes::virtualizeModule(M, p, rng);
+    }
+
+    if (InitialModuleGrowthOk &&
+        config_.passes.hash_self_decrypt.enabled.value_or(false)) {
+        passes::HashGatedSelfDecryptParams p;
+        p.probability =
+            config_.passes.hash_self_decrypt.probability.value_or(100);
+        p.max_payloads =
+            config_.passes.hash_self_decrypt.max_payloads.value_or(2);
+        p.context_keying =
+            config_.passes.hash_self_decrypt.context_keying.value_or(true);
+        changed |= passes::hashGatedSelfDecryptModule(M, p, rng);
+    }
 
     // Anti-analysis module passes run earliest.
     if (config_.passes.anti_hook.enabled.value_or(false))
@@ -347,34 +404,6 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
     if (InitialModuleGrowthOk &&
         config_.passes.vtable_integrity.enabled.value_or(false))
         changed |= passes::vtableIntegrityModule(M);
-
-    // VM lifting must run before block splitting / flattening make
-    // straight-line functions ineligible.  The generated morok.* helpers are
-    // skipped below.
-    if (InitialModuleGrowthOk &&
-        config_.passes.virtualization.enabled.value_or(false)) {
-        passes::VirtualizationParams p;
-        p.probability = config_.passes.virtualization.probability.value_or(20);
-        p.max_functions =
-            config_.passes.virtualization.max_functions.value_or(1);
-        p.max_instructions =
-            config_.passes.virtualization.max_instructions.value_or(64);
-        p.max_registers =
-            config_.passes.virtualization.max_registers.value_or(96);
-        changed |= passes::virtualizeModule(M, p, rng);
-    }
-
-    if (InitialModuleGrowthOk &&
-        config_.passes.hash_self_decrypt.enabled.value_or(false)) {
-        passes::HashGatedSelfDecryptParams p;
-        p.probability =
-            config_.passes.hash_self_decrypt.probability.value_or(100);
-        p.max_payloads =
-            config_.passes.hash_self_decrypt.max_payloads.value_or(2);
-        p.context_keying =
-            config_.passes.hash_self_decrypt.context_keying.value_or(true);
-        changed |= passes::hashGatedSelfDecryptModule(M, p, rng);
-    }
 
     if (InitialModuleGrowthOk) {
         std::uint64_t VisitedEligibleFunctions = 0;
@@ -815,12 +844,16 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
         }
     }
 
-    // Sensitive generated helpers (string decryptors, bytecode decryptors,
-    // integrity hash nodes, anti-debug constructors) are deliberately skipped
-    // by the normal per-function loop because they are `morok.*`.  Give only
-    // that allowlisted protection code a denser MBA/opaque-predicate shell
-    // when the corresponding families are enabled, after all per-function
-    // passes have had a chance to emit their own helpers.
+    // Sensitive generated helpers are deliberately skipped by the normal
+    // per-function loop because they are `morok.*`.  Once anti-debug,
+    // anti-hook, and integrity passes have emitted their helpers, lift the
+    // allowlisted checker bodies into bytecode VMs so their logic is not left
+    // as native plaintext.  The existing shell-hardening pass can then add MBA
+    // and opaque predicates around whatever wrapper/helper code remains.
+    if (InitialModuleGrowthOk)
+        changed |= virtualizeSensitiveGeneratedFunctions(M, config_.passes,
+                                                         rng);
+
     if (InitialModuleGrowthOk)
         changed |= hardenSensitiveGeneratedFunctions(M, config_.passes, rng);
 

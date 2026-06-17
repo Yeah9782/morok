@@ -26,6 +26,8 @@ struct VirtualizationParams {
     std::uint32_t max_functions = 4;       ///< maximum lifted functions/module
     std::uint32_t max_instructions = 128;  ///< maximum VM instructions/function
     std::uint32_t max_registers = 96;      ///< bytecode virtual-register cap
+    bool include_protection_helpers = false; ///< lift allowlisted checkers too
+    bool protection_helpers_only = false;    ///< restrict selection to checkers
 };
 
 /// Lift a single eligible function into a private threaded bytecode VM helper.
@@ -35,6 +37,13 @@ bool virtualizeFunction(llvm::Function &F, const VirtualizationParams &params,
 /// Lift selected eligible functions in `M` into per-function bytecode VMs.
 bool virtualizeModule(llvm::Module &M, const VirtualizationParams &params,
                       morok::ir::IRRandom &rng);
+
+/// Read-only predicate: would `F` (in its current shape) be lifted by the
+/// virtualizer under `params`?  Used by earlier pipeline stages (e.g. optimizer
+/// amplification) to yield VM-bound functions to the virtualizer untouched —
+/// growth transforms would otherwise bloat them past the lifter's budget.
+bool virtualizationWillLift(llvm::Function &F,
+                            const VirtualizationParams &params);
 
 /// New-PM module-pass wrapper for standalone use (`-passes=morok-vm`).
 class VirtualizationPass : public llvm::PassInfoMixin<VirtualizationPass> {

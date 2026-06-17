@@ -541,15 +541,16 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   passes.  Standalone `morok-uniform` composes both halves for targeted use.
 
 ## Virtualization — threaded bytecode VM
-- Selected functions are lifted only when the pass can prove a strict
-  straight-line integer subset: 1- to 64-bit integer return, integer arguments
-  no wider than the return, one basic block, no calls or memory, unflagged
-  modular arithmetic/bitwise/constant shifts, integer comparisons, and
-  zero/sign-extension or truncation of narrower integer values.  Narrow
-  arithmetic is masked back to its source width; signed narrow compares and
-  `sext` are lowered by sign-extending through VM shifts.  Branchless `select`
-  over a one-bit condition and same-width integer values is also supported, as
-  are narrow boolean `and`/`or`/`xor` predicate compositions.  Unsupported IR is
+- Selected functions are lifted only when the pass can prove a bounded scalar
+  subset: 1- to 64-bit integer or address-space-0 pointer returns/arguments,
+  ordinary branches/switches, entry allocas, scalar loads/stores, GEPs,
+  integer arithmetic/bitwise ops, integer comparisons, scalar selects, integer
+  casts, and a small pure-intrinsic set.  Generated protection-helper VMs add a
+  call handler for scalar direct calls to defined non-vararg functions, scalar
+  indirect calls, and inline-asm calls, which lets checker graphs and direct
+  syscall probes move behind the VM without enabling arbitrary user call-graph
+  virtualization.  Non-atomic volatile memory accesses are accepted and
+  conservatively re-emitted as volatile VM memory accesses.  Unsupported IR is
   left untouched rather than approximated.
 - The lifted function becomes a native wrapper that calls an internal
   `morok.vm.<function>.exec` helper.  The original computation is encoded as a
@@ -560,6 +561,9 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   the original integer width after each operation, and decodes one instruction
   at a time.  Constants, operands, and opcodes are decrypted from the current PC
   rather than materializing a plaintext program image.
+- Address constants used by generated checkers are routed through a private
+  per-helper `morok.vm.ptrs.*` table.  The encrypted bytecode carries only the
+  table index, and the helper materializes the pointer at the use site.
 - Dispatch is threaded computed-goto: the decoded opcode indexes a private
   `morok.vm.targets.*` blockaddress table, loads the target pointer, and reaches
   handlers through `indirectbr`.  There is no central `switch` decode anchor.
@@ -567,10 +571,15 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   variants use equivalent formulas for add/sub/xor/and/or and PC-neutralized
   polymorphic forms for the remaining operations, so one opcode does not map to
   one stable handler shape.
-- Scheduler placement is before per-function splitting/flattening; otherwise
-  the structural passes would make the straight-line source functions
-  ineligible.  The generated `morok.*` helpers are skipped by the later
-  per-function pipeline.
+- Scheduler placement has two phases.  User-code VM lifting runs before
+  per-function splitting/flattening, otherwise structural passes would make
+  clean source kernels ineligible.  A second protection-helper-only VM pass runs
+  after anti-debug, anti-hook, timing/trap, self-checksum, mutual-guard, DFI,
+  and vtable helpers have been emitted.  That late pass only considers
+  allowlisted generated checker prefixes (`morok.antidbg`, `morok.antihook`,
+  `morok.timing`, `morok.trap`, `morok.sc.diff.*`, `morok.mg.*`,
+  `morok.dfi.hash.*`, `morok.vti.*`) so VM infrastructure and unrelated
+  decoys are not recursively lifted.
 
 ## Hash-gated self-decrypting VM bytecode — IR structure
 - Native block encryption needs post-link layout and W^X runtime cooperation,
@@ -1255,6 +1264,6 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   they can clone or generate dense IR.
 
 ## Scheduler order (to preserve semantics)
-AntiHook → AntiClassDump → AntiDebug → TimingOracle → TrapOracle → StringEnc → FCO(fn) → VTableIntegrity → Virtualization → HashSelfDecrypt → per-fn{ Split, BCF, OptAmp, Sub,
-MBA, AliasOp, ExtOp, CoherentDecoys, NiState/EntFla/CSM(generator)/Flatten, StateOp, IFSM, PhiTangle, TypePun, StackCoalesce, StackDelta, PointerLaunder, DataFlowIntegrity, TableArith, Uniform, Vec, PathExplosion, MqGate, TraceKeying, Dispatcherless, MicrocodeStress, SelfChecksum, MutualGuardGraph, ShamirShare, ConstEnc, IndirectBranch } → SensitiveHelperHardening → AdversarialSelfTuning → AdversarialFunctionMerging → FunctionWrapper → PerBuildPolymorphism →
+Virtualization(user) → HashSelfDecrypt → AntiHook → AntiClassDump → AntiDebug → TimingOracle → TrapOracle → StringEnc → FCO(fn) → VTableIntegrity → per-fn{ Split, BCF, OptAmp, Sub,
+MBA, AliasOp, ExtOp, CoherentDecoys, NiState/EntFla/CSM(generator)/Flatten, StateOp, IFSM, PhiTangle, TypePun, StackCoalesce, StackDelta, PointerLaunder, DataFlowIntegrity, TableArith, Uniform, Vec, PathExplosion, MqGate, TraceKeying, Dispatcherless, MicrocodeStress, SelfChecksum, MutualGuardGraph, ShamirShare, ConstEnc, IndirectBranch } → ProtectionHelperVM → SensitiveHelperHardening → AdversarialSelfTuning → AdversarialFunctionMerging → FunctionWrapper → PerBuildPolymorphism →
 MisleadingMetadata → FeatureElimination (strip debug/names) → cleanup marker decls.

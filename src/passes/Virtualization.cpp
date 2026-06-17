@@ -42,6 +42,7 @@
 #include "llvm/IR/GetElementPtrTypeIterator.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
@@ -114,6 +115,8 @@ enum class VmOp : std::uint8_t {
     Store16,
     Store32,
     Store64,
+    PtrConst,
+    Call,
     Count,
 };
 
@@ -134,6 +137,21 @@ struct AllocaSpec {
     std::uint8_t reg = 0;
 };
 
+// A lifted call.  Everything is fixed at lift time and baked into a dedicated
+// per-call-site handler, so the bytecode Call instruction only has to select
+// that handler (no operands) — which sidesteps the 3-register-field limit on
+// arbitrary argument counts.
+struct CallSite {
+    FunctionType *fn_ty = nullptr;
+    Value *direct = nullptr;        // non-null: direct call/inline asm target
+    std::uint8_t callee_reg = 0;    // indirect: register holding the fn pointer
+    bool indirect = false;
+    CallingConv::ID cc = CallingConv::C;
+    std::vector<std::uint8_t> args; // argument registers (canonical)
+    bool has_result = false;
+    std::uint8_t result_reg = 0;
+};
+
 struct Program {
     Function *source = nullptr;
     RetKind ret_kind = RetKind::Int;
@@ -141,6 +159,8 @@ struct Program {
     std::uint32_t num_args = 0;
     std::vector<VmInstr> code;
     std::vector<AllocaSpec> allocas;
+    std::vector<CallSite> calls;
+    std::vector<Constant *> pointer_constants;
 };
 
 struct Encoding {
@@ -167,6 +187,29 @@ std::size_t opIndex(VmOp Op) { return static_cast<std::size_t>(Op); }
 
 bool generatedFunction(const Function &F) {
     return F.getName().starts_with("morok.");
+}
+
+bool generatedProtectionFunction(const Function &F) {
+    StringRef Name = F.getName();
+    return Name.starts_with("morok.antidbg") ||
+           Name.starts_with("morok.antihook") ||
+           Name.starts_with("morok.timing") ||
+           Name.starts_with("morok.trap") ||
+           Name.starts_with("morok.sc.diff.") ||
+           Name.starts_with("morok.mg.node.") ||
+           Name.starts_with("morok.mg.diff.") ||
+           Name.starts_with("morok.dfi.hash.") ||
+           Name.starts_with("morok.vti.");
+}
+
+bool candidateFunctionAllowed(const Function &F,
+                              const VirtualizationParams &Params) {
+    if (Params.protection_helpers_only)
+        return Params.include_protection_helpers &&
+               generatedProtectionFunction(F);
+    if (!generatedFunction(F))
+        return true;
+    return Params.include_protection_helpers && generatedProtectionFunction(F);
 }
 
 std::uint64_t widthMask(unsigned Width) {
@@ -356,6 +399,83 @@ bool isSkippableIntrinsic(const CallBase &CB) {
     }
 }
 
+// Pure scalar-integer intrinsics the lifter expands inline into existing VM ops
+// (no native call, no new opcode).  Optimized code lowers idioms to these —
+// rotates become fshl/fshr, min/max become smax/umin, etc. — so accepting them
+// is what lets the VM lift real -O2/-O3 leaf and loop kernels (e.g. the rotate-
+// heavy round functions of a crackme).
+bool isLowerableIntrinsic(const CallBase &CB) {
+    const auto *II = dyn_cast<IntrinsicInst>(&CB);
+    if (!II)
+        return false;
+    switch (II->getIntrinsicID()) {
+    case Intrinsic::fshl:
+    case Intrinsic::fshr: {
+        // Funnel shifts use a (width-1) modulo mask, so the width must be a
+        // power of two — exactly {8,16,32,64} within the VM int set.
+        auto *I = dyn_cast<IntegerType>(II->getType());
+        if (!I)
+            return false;
+        switch (I->getBitWidth()) {
+        case 8:
+        case 16:
+        case 32:
+        case 64:
+            return true;
+        default:
+            return false;
+        }
+    }
+    case Intrinsic::smax:
+    case Intrinsic::smin:
+    case Intrinsic::umax:
+    case Intrinsic::umin:
+    case Intrinsic::abs:
+        return isVmIntTy(II->getType());
+    default:
+        return false;
+    }
+}
+
+// A generated-protection-helper call the VM can virtualize: scalar (int/ptr)
+// signature, non-variadic, no by-value/sret-style aggregate ABI, and either a
+// direct call to a DEFINED function, inline asm, or an indirect call through a
+// value.  User functions still reject ordinary calls: lifting arbitrary call
+// graphs changes too much ABI/backend surface.  Calls to external declarations
+// (imports) are also gated out so a naked import call never appears inside a
+// handler.  Pure intrinsics are handled elsewhere.
+bool liftableCall(const CallBase &CB, bool AllowProtectionCalls,
+                  bool AllowInlineAsm) {
+    const auto *CI = dyn_cast<CallInst>(&CB);
+    if (!CI || CI->isMustTailCall() || CI->hasOperandBundles())
+        return false;
+    FunctionType *FT = CB.getFunctionType();
+    if (FT->isVarArg() || CB.arg_size() != FT->getNumParams())
+        return false;
+    Type *Ret = FT->getReturnType();
+    if (!Ret->isVoidTy() && !isScalarVmTy(Ret))
+        return false;
+    for (Type *PT : FT->params())
+        if (!isScalarVmTy(PT))
+            return false;
+    for (unsigned I = 0; I < CB.arg_size(); ++I)
+        if (CB.paramHasAttr(I, Attribute::ByVal) ||
+            CB.paramHasAttr(I, Attribute::StructRet) ||
+            CB.paramHasAttr(I, Attribute::InAlloca) ||
+            CB.paramHasAttr(I, Attribute::Preallocated) ||
+            CB.paramHasAttr(I, Attribute::ByRef))
+            return false;
+    if (CI->isInlineAsm())
+        return AllowInlineAsm;
+    if (!AllowProtectionCalls)
+        return false;
+    if (const Function *Callee = CB.getCalledFunction())
+        return !Callee->isDeclaration() && !Callee->isIntrinsic() &&
+               !Callee->isVarArg();
+    // Indirect call: the callee operand is materialized as a register at lift.
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Eligibility (read-only): everything checked here guarantees the post-demotion
 // build succeeds, so the lifter never mutates a function it cannot finish.
@@ -400,7 +520,7 @@ bool sizedNonScalable(const DataLayout &DL, Type *T) {
 }
 
 bool liftableInstruction(const Instruction &I, const BasicBlock &Entry,
-                         const DataLayout &DL) {
+                         const DataLayout &DL, bool AllowProtectionCalls) {
     if (isa<PHINode>(I))
         return isScalarVmTy(I.getType()); // demoted to a stack slot of this type
 
@@ -426,10 +546,10 @@ bool liftableInstruction(const Instruction &I, const BasicBlock &Entry,
         return S->getCondition()->getType()->isIntegerTy(1) &&
                isScalarVmTy(S->getType());
     if (const auto *L = dyn_cast<LoadInst>(&I))
-        return L->isSimple() && isPtrAS0(L->getPointerOperandType()) &&
+        return !L->isAtomic() && isPtrAS0(L->getPointerOperandType()) &&
                accessBytes(L->getType()).has_value();
     if (const auto *St = dyn_cast<StoreInst>(&I))
-        return St->isSimple() && isPtrAS0(St->getPointerOperandType()) &&
+        return !St->isAtomic() && isPtrAS0(St->getPointerOperandType()) &&
                accessBytes(St->getValueOperand()->getType()).has_value();
     if (const auto *G = dyn_cast<GetElementPtrInst>(&I)) {
         if (!isPtrAS0(G->getType()) ||
@@ -449,13 +569,15 @@ bool liftableInstruction(const Instruction &I, const BasicBlock &Entry,
     if (const auto *Fr = dyn_cast<FreezeInst>(&I))
         return isScalarVmTy(Fr->getType());
     if (const auto *CB = dyn_cast<CallBase>(&I))
-        return isSkippableIntrinsic(*CB);
+        return isSkippableIntrinsic(*CB) || isLowerableIntrinsic(*CB) ||
+               liftableCall(*CB, AllowProtectionCalls,
+                            /*AllowInlineAsm=*/AllowProtectionCalls);
     return false;
 }
 
 bool isEligible(Function &F, const VirtualizationParams &Params) {
-    if (F.isDeclaration() || generatedFunction(F) || F.hasPersonalityFn() ||
-        ir::usesFuncletEH(F))
+    if (F.isDeclaration() || !candidateFunctionAllowed(F, Params) ||
+        F.hasPersonalityFn() || ir::usesFuncletEH(F))
         return false;
     if (Params.max_instructions == 0 || Params.max_registers == 0)
         return false;
@@ -466,6 +588,8 @@ bool isEligible(Function &F, const VirtualizationParams &Params) {
 
     const DataLayout &DL = F.getParent()->getDataLayout();
     const BasicBlock &Entry = F.getEntryBlock();
+    const bool AllowProtectionCalls =
+        Params.include_protection_helpers && generatedProtectionFunction(F);
     std::uint32_t Instructions = 0;
     // Coarse pre-estimate of the post-demotion register arena (every value used
     // across blocks or by a PHI becomes a stack slot).  Reject if it cannot fit
@@ -477,7 +601,7 @@ bool isEligible(Function &F, const VirtualizationParams &Params) {
         for (const Instruction &I : BB) {
             if (I.isTerminator())
                 continue;
-            if (!liftableInstruction(I, Entry, DL))
+            if (!liftableInstruction(I, Entry, DL, AllowProtectionCalls))
                 return false;
             if (++Instructions > kMaxLiftInstructions)
                 return false;
@@ -520,6 +644,7 @@ private:
     Program P_;
     DenseMap<const Value *, std::uint8_t> Fixed_; // args + alloca addresses
     DenseMap<const Value *, std::uint8_t> Local_; // per-block scratch / consts
+    DenseMap<Constant *, std::uint32_t> PointerConstantIds_;
     std::uint32_t Base_ = 0;
     std::uint32_t LocalNext_ = 0;
     std::uint32_t MaxReg_ = 0;
@@ -562,6 +687,27 @@ private:
         return R;
     }
 
+    std::uint32_t pointerConstantId(Constant *C) {
+        auto It = PointerConstantIds_.find(C);
+        if (It != PointerConstantIds_.end())
+            return It->second;
+        const auto Id = static_cast<std::uint32_t>(P_.pointer_constants.size());
+        PointerConstantIds_[C] = Id;
+        P_.pointer_constants.push_back(C);
+        return Id;
+    }
+
+    std::optional<std::uint8_t> materializePointerConstant(Constant *C) {
+        if (!isPtrAS0(C->getType()))
+            return std::nullopt;
+        auto R = newLocalReg();
+        if (!R)
+            return std::nullopt;
+        if (!emit({VmOp::PtrConst, *R, 0, 0, pointerConstantId(C)}))
+            return std::nullopt;
+        return R;
+    }
+
     std::optional<std::uint8_t> materialize(Value *V) {
         if (auto It = Fixed_.find(V); It != Fixed_.end())
             return It->second;
@@ -581,7 +727,13 @@ private:
                 Local_[V] = *R;
             return R;
         }
-        return std::nullopt; // global / constexpr address: not encodable
+        if (auto *C = dyn_cast<Constant>(V)) {
+            auto R = materializePointerConstant(C);
+            if (R)
+                Local_[V] = *R;
+            return R;
+        }
+        return std::nullopt;
     }
 
     // Sign-extend a canonical-W value to a full signed 64-bit value.
@@ -621,6 +773,33 @@ private:
         return D;
     }
 
+    // reg & constant.
+    std::optional<std::uint8_t> andConst(std::uint8_t Reg, std::uint64_t Mask) {
+        auto M = materializeImm(Mask, 64);
+        if (!M)
+            return std::nullopt;
+        return emitRaw(VmOp::And, Reg, *M);
+    }
+
+    // constant - reg.
+    std::optional<std::uint8_t> subFrom(std::uint64_t K, std::uint8_t Reg) {
+        auto KK = materializeImm(K, 64);
+        if (!KK)
+            return std::nullopt;
+        return emitRaw(VmOp::Sub, *KK, Reg);
+    }
+
+    // dst = cond ? T : Fv  (cond is a canonical i1 register).
+    std::optional<std::uint8_t> emitSelect(std::uint8_t Cond, std::uint8_t T,
+                                           std::uint8_t Fv) {
+        auto D = newLocalReg();
+        if (!D)
+            return std::nullopt;
+        if (!emit({VmOp::Select, *D, Cond, T, Fv}))
+            return std::nullopt;
+        return D;
+    }
+
     bool liftBinary(BinaryOperator &BO);
     bool liftICmp(ICmpInst &C);
     bool liftCast(Instruction &I);
@@ -628,6 +807,8 @@ private:
     bool liftLoad(LoadInst &L);
     bool liftStore(StoreInst &St);
     bool liftGep(GetElementPtrInst &G);
+    bool liftIntrinsic(IntrinsicInst &II);
+    bool liftCall(CallInst &CI);
     bool liftInstruction(Instruction &I);
     bool liftTerminator(Instruction &T);
     bool liftBlock(BasicBlock &BB);
@@ -820,11 +1001,181 @@ bool Lifter::liftGep(GetElementPtrInst &G) {
     return true;
 }
 
+// Expand a pure scalar intrinsic into existing VM ops.  All width handling is
+// explicit; results are canonical-W like every other lifted value.
+bool Lifter::liftIntrinsic(IntrinsicInst &II) {
+    const unsigned W = II.getType()->getIntegerBitWidth();
+    const Intrinsic::ID Id = II.getIntrinsicID();
+
+    if (Id == Intrinsic::smax || Id == Intrinsic::smin ||
+        Id == Intrinsic::umax || Id == Intrinsic::umin) {
+        auto A = materialize(II.getArgOperand(0));
+        auto B = materialize(II.getArgOperand(1));
+        if (!A || !B)
+            return false;
+        const bool Signed = Id == Intrinsic::smax || Id == Intrinsic::smin;
+        std::optional<std::uint8_t> Cmp;
+        if (Signed) {
+            auto SA = sext64(*A, W);
+            auto SB = sext64(*B, W);
+            if (!SA || !SB)
+                return false;
+            const VmOp P = (Id == Intrinsic::smax) ? VmOp::ICmpSGT
+                                                   : VmOp::ICmpSLT;
+            Cmp = emitRaw(P, *SA, *SB);
+        } else {
+            const VmOp P = (Id == Intrinsic::umax) ? VmOp::ICmpUGT
+                                                   : VmOp::ICmpULT;
+            Cmp = emitRaw(P, *A, *B);
+        }
+        if (!Cmp)
+            return false;
+        auto D = emitSelect(*Cmp, *A, *B); // cmp ? A : B
+        if (!D)
+            return false;
+        Local_[&II] = *D;
+        return true;
+    }
+
+    if (Id == Intrinsic::abs) {
+        auto A = materialize(II.getArgOperand(0));
+        if (!A)
+            return false;
+        auto SA = sext64(*A, W);
+        auto Zero = materializeImm(0, 64);
+        if (!SA || !Zero)
+            return false;
+        auto Cmp = emitRaw(VmOp::ICmpSLT, *SA, *Zero); // A <s 0
+        auto NegRaw = emitRaw(VmOp::Sub, *Zero, *A);   // 0 - A
+        if (!Cmp || !NegRaw)
+            return false;
+        auto Neg = maskTo(*NegRaw, W);
+        if (!Neg)
+            return false;
+        auto D = emitSelect(*Cmp, *Neg, *A); // A<0 ? -A : A
+        if (!D)
+            return false;
+        Local_[&II] = *D;
+        return true;
+    }
+
+    // Funnel shifts: fshl(a,b,c) = top W bits of ((a:b) << (c mod W));
+    // fshr(a,b,c) = low W bits of ((a:b) >> (c mod W)).  W is a power of two,
+    // so `mod = c & (W-1)`.  The mod==0 case is selected explicitly to avoid a
+    // 64-bit shift-by-64 (poison) when W==64.
+    const bool Left = Id == Intrinsic::fshl;
+    auto A = materialize(II.getArgOperand(0));
+    auto B = materialize(II.getArgOperand(1));
+    auto C = materialize(II.getArgOperand(2));
+    if (!A || !B || !C)
+        return false;
+    auto Mod = andConst(*C, W - 1);
+    auto Zero = materializeImm(0, 64);
+    if (!Mod || !Zero)
+        return false;
+    auto IsZero = emitRaw(VmOp::ICmpEQ, *Mod, *Zero);
+    if (!IsZero)
+        return false;
+
+    std::optional<std::uint8_t> Res;
+    if (Left) {
+        auto P1s = emitRaw(VmOp::Shl, *A, *Mod);
+        auto Rsh = subFrom(W, *Mod); // W - mod
+        if (!P1s || !Rsh)
+            return false;
+        auto P1 = maskTo(*P1s, W);
+        auto P2raw = emitRaw(VmOp::LShr, *B, *Rsh);
+        if (!P1 || !P2raw)
+            return false;
+        auto P2 = emitSelect(*IsZero, *Zero, *P2raw); // mod==0 -> 0
+        if (!P2)
+            return false;
+        auto Or = emitRaw(VmOp::Or, *P1, *P2);
+        if (!Or)
+            return false;
+        Res = maskTo(*Or, W);
+    } else {
+        auto P2 = emitRaw(VmOp::LShr, *B, *Mod); // b >> mod
+        auto Lsh = subFrom(W, *Mod);             // W - mod
+        if (!P2 || !Lsh)
+            return false;
+        auto P1s = emitRaw(VmOp::Shl, *A, *Lsh);
+        if (!P1s)
+            return false;
+        auto P1raw = maskTo(*P1s, W);
+        if (!P1raw)
+            return false;
+        auto P1 = emitSelect(*IsZero, *Zero, *P1raw); // mod==0 -> 0
+        if (!P1)
+            return false;
+        auto Or = emitRaw(VmOp::Or, *P1, *P2);
+        if (!Or)
+            return false;
+        Res = maskTo(*Or, W);
+    }
+    if (!Res)
+        return false;
+    Local_[&II] = *Res;
+    return true;
+}
+
+// Record a call as a dedicated call site; the bytecode instruction only carries
+// the call index (its handler bakes callee/args/result).
+bool Lifter::liftCall(CallInst &CI) {
+    const bool AllowProtectionCalls =
+        Params_.include_protection_helpers && generatedProtectionFunction(F_);
+    if (!AllowProtectionCalls)
+        return false;
+    if (P_.calls.size() >= 200) // bound: one dispatch handler id per call site
+        return false;
+    CallSite CS;
+    CS.fn_ty = CI.getFunctionType();
+    CS.cc = CI.getCallingConv();
+    if (CI.isInlineAsm()) {
+        CS.direct = CI.getCalledOperand();
+    } else if (Function *Callee = CI.getCalledFunction()) {
+        CS.direct = Callee;
+    } else {
+        auto Reg = materialize(CI.getCalledOperand());
+        if (!Reg)
+            return false;
+        CS.indirect = true;
+        CS.callee_reg = *Reg;
+    }
+    for (Value *Arg : CI.args()) {
+        auto R = materialize(Arg);
+        if (!R)
+            return false;
+        CS.args.push_back(*R);
+    }
+    if (!CI.getType()->isVoidTy()) {
+        auto D = newLocalReg();
+        if (!D)
+            return false;
+        CS.has_result = true;
+        CS.result_reg = *D;
+        Local_[&CI] = *D;
+    }
+    const std::uint32_t Idx = static_cast<std::uint32_t>(P_.calls.size());
+    P_.calls.push_back(std::move(CS));
+    return emit({VmOp::Call, 0, 0, 0, Idx}); // imm = call index (handler select)
+}
+
 bool Lifter::liftInstruction(Instruction &I) {
     if (isa<AllocaInst>(&I))
         return true; // arena slot already assigned in Fixed_
+    if (auto *II = dyn_cast<IntrinsicInst>(&I)) {
+        if (isLowerableIntrinsic(*II))
+            return liftIntrinsic(*II);
+        return isSkippableIntrinsic(*II); // skip; never a value source
+    }
+    if (auto *CI = dyn_cast<CallInst>(&I)) {
+        if (isSkippableIntrinsic(*CI))
+            return true;
+        return liftCall(*CI);
+    }
     if (auto *CB = dyn_cast<CallBase>(&I))
-        return isSkippableIntrinsic(*CB); // skip; never a value source
+        return isSkippableIntrinsic(*CB); // invoke/callbr: skip-list only
     if (auto *BO = dyn_cast<BinaryOperator>(&I))
         return liftBinary(*BO);
     if (auto *C = dyn_cast<ICmpInst>(&I))
@@ -1004,7 +1355,7 @@ void shuffleSpecs(std::vector<HandlerSpec> &Specs, ir::IRRandom &Rng) {
     }
 }
 
-HandlerLayout makeLayout(ir::IRRandom &Rng) {
+HandlerLayout makeLayout(ir::IRRandom &Rng, std::uint32_t NumCalls) {
     HandlerLayout Layout;
     Layout.specs = {
         {VmOp::Const, 0, "const"},  {VmOp::Ret, 0, "ret"},
@@ -1034,8 +1385,16 @@ HandlerLayout makeLayout(ir::IRRandom &Rng) {
         {VmOp::Load32, 0, "load32"}, {VmOp::Load64, 0, "load64"},
         {VmOp::Store8, 0, "store8"}, {VmOp::Store16, 0, "store16"},
         {VmOp::Store32, 0, "store32"}, {VmOp::Store64, 0, "store64"},
+        {VmOp::PtrConst, 0, "ptrconst"},
     };
     shuffleSpecs(Layout.specs, Rng);
+    // Each call site gets its own handler, appended in order AFTER the shuffle
+    // so the call-index -> handler-id mapping is stable (encoder and builder
+    // must agree).  variant carries the call index.
+    for (std::uint32_t I = 0; I < NumCalls; ++I)
+        Layout.specs.push_back(
+            {VmOp::Call, static_cast<std::uint8_t>(I),
+             std::string("call.") + std::to_string(I)});
     for (std::uint32_t I = 0; I < Layout.specs.size(); ++I)
         Layout.ids[opIndex(Layout.specs[I].op)].push_back(
             static_cast<std::uint8_t>(I));
@@ -1072,8 +1431,12 @@ std::vector<std::uint8_t> encodeBytecode(const Program &P,
     for (std::uint32_t I = 0; I < P.code.size(); ++I) {
         const VmInstr &Instr = P.code[I];
         const std::vector<std::uint8_t> &Ids = Layout.ids[opIndex(Instr.op)];
+        // A call selects its dedicated handler by index (imm); every other op
+        // picks one of its interchangeable handler variants at random.
         const std::uint8_t Handler =
-            Ids[Rng.range(static_cast<std::uint32_t>(Ids.size()))];
+            Instr.op == VmOp::Call
+                ? Ids[static_cast<std::size_t>(Instr.imm)]
+                : Ids[Rng.range(static_cast<std::uint32_t>(Ids.size()))];
         const std::uint32_t Pc = I * kInstrStride;
         std::array<std::uint8_t, kInstrStride> Plain{};
         Plain[0] = Handler;
@@ -1403,12 +1766,33 @@ GlobalVariable *createTargetTable(Module &M, Function *Helper,
         std::string("morok.vm.targets.") + SourceName.str());
 }
 
+GlobalVariable *createPointerTable(Module &M, ArrayRef<Constant *> Pointers,
+                                   StringRef SourceName) {
+    if (Pointers.empty())
+        return nullptr;
+    LLVMContext &Ctx = M.getContext();
+    auto *PtrTy = PointerType::getUnqual(Ctx);
+    auto *ArrTy = ArrayType::get(PtrTy, Pointers.size());
+    SmallVector<Constant *, 16> Entries;
+    Entries.reserve(Pointers.size());
+    for (Constant *Ptr : Pointers)
+        Entries.push_back(ConstantExpr::getPointerCast(Ptr, PtrTy));
+    auto *GV = new GlobalVariable(
+        M, ArrTy, /*isConstant=*/true, GlobalValue::PrivateLinkage,
+        ConstantArray::get(ArrTy, Entries),
+        std::string("morok.vm.ptrs.") + SourceName.str());
+    GV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    GV->setAlignment(Align(8));
+    return GV;
+}
+
 // Load/store a fixed-width access against an address register.
 Value *emitMemLoad(Builder &B, Value *Addr, unsigned Bytes) {
     auto *Ptr = B.CreateIntToPtr(Addr, PointerType::getUnqual(B.getContext()),
                                  "morok.vm.mem.ptr");
     Type *Ty = B.getIntNTy(Bytes * 8);
     auto *Ld = B.CreateLoad(Ty, Ptr, "morok.vm.mem.val");
+    Ld->setVolatile(true);
     Ld->setAlignment(Align(1));
     return B.CreateZExt(Ld, B.getInt64Ty(), "morok.vm.mem.zext");
 }
@@ -1421,6 +1805,7 @@ void emitMemStore(Builder &B, Value *Addr, Value *Val, unsigned Bytes) {
                    : B.CreateTrunc(Val, B.getIntNTy(Bytes * 8),
                                    "morok.vm.mem.trunc");
     auto *St = B.CreateStore(Narrow, Ptr);
+    St->setVolatile(true);
     St->setAlignment(Align(1));
 }
 
@@ -1456,6 +1841,9 @@ Function *buildHelper(Module &M, const Program &P, GlobalVariable *Bytecode,
 
     GlobalVariable *Targets =
         createTargetTable(M, Helper, Handlers, Src->getName());
+    GlobalVariable *PointerTable =
+        createPointerTable(M, ArrayRef<Constant *>(P.pointer_constants),
+                           Src->getName());
 
     Builder EB(Entry);
     AllocaInst *Regs = EB.CreateAlloca(RegsTy, nullptr, "morok.vm.regs");
@@ -1637,6 +2025,68 @@ Function *buildHelper(Module &M, const Program &P, GlobalVariable *Bytecode,
             advancePc(B, PcSlot, Dispatch);
             continue;
         }
+        case VmOp::PtrConst: {
+            Value *Dst = emitDecodeReg(B, Bytecode, CurPc, 1, Enc);
+            Value *Idx =
+                B.CreateTrunc(emitDecodeImm(B, Bytecode, CurPc, Enc), I32,
+                              "morok.vm.ptr.idx");
+            Value *Ptr = ConstantPointerNull::get(PtrTy);
+            if (PointerTable) {
+                auto *PtrTableTy = cast<ArrayType>(PointerTable->getValueType());
+                Value *PtrSlot = B.CreateInBoundsGEP(
+                    PtrTableTy, PointerTable,
+                    {ConstantInt::get(I32, 0), Idx}, "morok.vm.ptr.slot");
+                Ptr = B.CreateLoad(PtrTy, PtrSlot, "morok.vm.ptr.load");
+            }
+            storeReg(B, Regs, RegsTy, Dst,
+                     B.CreatePtrToInt(Ptr, I64, "morok.vm.ptr.addr"));
+            advancePc(B, PcSlot, Dispatch);
+            continue;
+        }
+        case VmOp::Call: {
+            // Per-call-site handler: callee, signature, argument registers and
+            // result register are all fixed at lift time and baked in here, so
+            // the bytecode instruction needs no operands.
+            const CallSite &CS = P.calls[Spec.variant];
+            SmallVector<Value *, 8> Args;
+            for (std::uint32_t A = 0; A < CS.fn_ty->getNumParams(); ++A) {
+                Value *Raw = loadReg(B, Regs, RegsTy,
+                                     ConstantInt::get(I32, CS.args[A]));
+                Type *PT = CS.fn_ty->getParamType(A);
+                if (PT->isPointerTy())
+                    Args.push_back(
+                        B.CreateIntToPtr(Raw, PT, "morok.vm.call.arg"));
+                else if (PT->getIntegerBitWidth() < 64)
+                    Args.push_back(
+                        B.CreateTrunc(Raw, PT, "morok.vm.call.arg"));
+                else
+                    Args.push_back(Raw);
+            }
+            Value *Callee =
+                CS.indirect
+                    ? B.CreateIntToPtr(
+                          loadReg(B, Regs, RegsTy,
+                                  ConstantInt::get(I32, CS.callee_reg)),
+                          PtrTy, "morok.vm.call.fp")
+                    : CS.direct;
+            CallInst *Call = B.CreateCall(
+                CS.fn_ty, Callee, Args,
+                CS.fn_ty->getReturnType()->isVoidTy() ? "" : "morok.vm.call.r");
+            Call->setCallingConv(CS.cc);
+            if (CS.has_result) {
+                Type *RT = CS.fn_ty->getReturnType();
+                Value *Res =
+                    RT->isPointerTy()
+                        ? B.CreatePtrToInt(Call, I64, "morok.vm.call.res")
+                        : (RT->getIntegerBitWidth() < 64
+                               ? B.CreateZExt(Call, I64, "morok.vm.call.res")
+                               : static_cast<Value *>(Call));
+                storeReg(B, Regs, RegsTy, ConstantInt::get(I32, CS.result_reg),
+                         Res);
+            }
+            advancePc(B, PcSlot, Dispatch);
+            continue;
+        }
         default:
             break;
         }
@@ -1676,7 +2126,8 @@ void rewriteAsWrapper(Function &F, Function *Helper) {
 }
 
 bool materializeProgram(Module &M, Program &P, ir::IRRandom &Rng) {
-    HandlerLayout Layout = makeLayout(Rng);
+    HandlerLayout Layout =
+        makeLayout(Rng, static_cast<std::uint32_t>(P.calls.size()));
     Encoding Enc = makeEncoding(Rng);
     std::vector<std::uint8_t> Bytes = encodeBytecode(P, Layout, Enc, Rng);
     GlobalVariable *Bytecode = createBytecode(M, Bytes, P.source->getName());
@@ -1700,6 +2151,11 @@ bool liftOne(Function &F, const VirtualizationParams &Params,
 
 } // namespace
 
+bool virtualizationWillLift(Function &F, const VirtualizationParams &Params) {
+    return Params.probability != 0 && Params.max_functions != 0 &&
+           isEligible(F, Params);
+}
+
 bool virtualizeFunction(Function &F, const VirtualizationParams &Params,
                         ir::IRRandom &Rng) {
     if (Params.probability == 0 || Params.max_functions == 0 ||
@@ -1719,7 +2175,7 @@ bool virtualizeModule(Module &M, const VirtualizationParams &Params,
     // over the module.
     SmallVector<Function *, 32> Worklist;
     for (Function &F : M)
-        if (!F.isDeclaration() && !generatedFunction(F))
+        if (!F.isDeclaration() && candidateFunctionAllowed(F, Params))
             Worklist.push_back(&F);
 
     bool Changed = false;

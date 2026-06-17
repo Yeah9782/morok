@@ -803,6 +803,65 @@ TEST_CASE("MorokPass hardens sensitive generated decryptor helpers") {
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("MorokPass virtualizes generated protection helpers") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-unknown-linux-gnu"
+
+define i64 @work(i64 %x) {
+entry:
+  %a = add i64 %x, 7
+  %b = xor i64 %a, 19
+  %c = mul i64 %b, 3
+  ret i64 %c
+}
+
+define i64 @main(i64 %x) {
+entry:
+  %v = call i64 @work(i64 %x)
+  ret i64 %v
+}
+)ir");
+
+    morok::config::Config cfg;
+    cfg.seed = 712;
+    cfg.passes.virtualization.enabled = true;
+    cfg.passes.virtualization.probability = 0;
+    cfg.passes.virtualization.max_functions = 1;
+    cfg.passes.virtualization.max_instructions = 64;
+    cfg.passes.virtualization.max_registers = 96;
+    cfg.passes.anti_dbg.enabled = true;
+    cfg.passes.self_checksum.enabled = true;
+    cfg.passes.self_checksum.probability = 100;
+    cfg.passes.self_checksum.max_constants = 4;
+    cfg.passes.self_checksum.region_bytes = 32;
+
+    ModuleAnalysisManager AM;
+    morok::pipeline::MorokPass(std::move(cfg)).run(*M, AM);
+
+    CHECK(M->getFunction("morok.vm.work.exec") == nullptr);
+
+    Function *Probe = M->getFunction("morok.antidbg.probe");
+    Function *ProbeVm = M->getFunction("morok.vm.morok.antidbg.probe.exec");
+    REQUIRE(Probe);
+    REQUIRE(ProbeVm);
+    CHECK(countCallsTo(*Probe, "morok.vm.morok.antidbg.probe.exec") == 1u);
+    CHECK(countNamedInstructions(*Probe, "morok.watchdog.heartbeat.beat") ==
+          0u);
+    CHECK(countGlobals(*M, "morok.vm.bytecode.morok.antidbg.probe") == 1u);
+
+    Function *ScDiff = M->getFunction("morok.sc.diff.work");
+    Function *ScVm = M->getFunction("morok.vm.morok.sc.diff.work.exec");
+    REQUIRE(ScDiff);
+    REQUIRE(ScVm);
+    CHECK(countCallsTo(*ScDiff, "morok.vm.morok.sc.diff.work.exec") == 1u);
+    CHECK(countNamedInstructions(*ScDiff, "morok.sc.hash.mix") == 0u);
+    CHECK(countGlobals(*M, "morok.vm.bytecode.morok.sc.diff.work") == 1u);
+    CHECK(countGlobals(*M, "morok.vm.ptrs.morok.sc.diff.work") == 1u);
+
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("decoyStringsModule emits volatile decoy logging infrastructure") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
@@ -5626,6 +5685,52 @@ entry:
     CHECK(SeedDiverse);
 }
 
+TEST_CASE("virtualizeModule lifts allowlisted generated protection helpers") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-unknown-linux-gnu"
+
+@morok.sc.seed = private global i64 17, align 8
+
+define private i64 @morok.sc.diff.fake(i64 %x) {
+entry:
+  %seed = load volatile i64, ptr @morok.sc.seed, align 8
+  %tick = call i64 asm sideeffect "xorq $0, $0", "=r,~{dirflag},~{fpsr},~{flags}"()
+  %mix = xor i64 %seed, %x
+  %out = add i64 %mix, %tick
+  ret i64 %out
+}
+
+define i64 @user(i64 %x) {
+entry:
+  %y = add i64 %x, 1
+  ret i64 %y
+}
+)ir");
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(15103);
+    morok::ir::IRRandom rng(engine);
+    morok::passes::VirtualizationParams P{/*probability=*/100,
+                                           /*max_functions=*/4,
+                                           /*max_instructions=*/64,
+                                           /*max_registers=*/64};
+    P.include_protection_helpers = true;
+    P.protection_helpers_only = true;
+    CHECK(morok::passes::virtualizeModule(*M, P, rng));
+
+    Function *Diff = M->getFunction("morok.sc.diff.fake");
+    Function *Helper = M->getFunction("morok.vm.morok.sc.diff.fake.exec");
+    REQUIRE(Diff);
+    REQUIRE(Helper);
+    CHECK(M->getFunction("morok.vm.user.exec") == nullptr);
+    CHECK(countCallsTo(*Diff, "morok.vm.morok.sc.diff.fake.exec") == 1u);
+    CHECK(countNamedInstructions(*Diff, "mix") == 0u);
+    CHECK(countGlobals(*M, "morok.vm.ptrs.morok.sc.diff.fake") == 1u);
+    CHECK(countNamedInstructions(*Helper, "morok.vm.ptr.load") >= 1u);
+    CHECK(hasInlineAsmCall(*Helper));
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("virtualizeModule lifts integer comparisons, zext, and select idioms") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
@@ -6171,7 +6276,7 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_CASE("virtualizeModule skips functions that call other functions") {
+TEST_CASE("virtualizeModule skips calls to external (import) functions") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
 declare i32 @ext(i32)
@@ -6185,8 +6290,10 @@ entry:
     auto engine = morok::core::Xoshiro256pp::fromSeed(152);
     morok::ir::IRRandom rng(engine);
 
-    // Calls are deliberately gated out (the call-ABI surface is a separate
-    // follow-up); the function must be cleanly rejected with no partial output.
+    // Direct calls to *defined* functions are virtualized, but calls to an
+    // external declaration (an import) are deliberately gated out — routing
+    // them needs the import-cloaking machinery — so the function is cleanly
+    // rejected with no partial output.
     CHECK_FALSE(morok::passes::virtualizeModule(
         *M,
         {/*probability=*/100, /*max_functions=*/1,
@@ -6194,6 +6301,83 @@ entry:
         rng));
     CHECK(countGlobals(*M, "morok.vm.bytecode") == 0u);
     CHECK(M->getFunction("morok.vm.uses_call.exec") == nullptr);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("virtualizeModule skips ordinary calls in user functions") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define internal i32 @callee_add(i32 %x, i32 %y) {
+entry:
+  %s = add i32 %x, %y
+  %t = xor i32 %s, 305419896
+  ret i32 %t
+}
+
+define i32 @caller(i32 %a, i32 %b) {
+entry:
+  %r = call i32 @callee_add(i32 %a, i32 %b)
+  %m = mul i32 %r, 3
+  ret i32 %m
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(331);
+    morok::ir::IRRandom rng(engine);
+
+    // Call handlers are reserved for generated protection helpers.  User call
+    // graphs still stay native until the VM has a stronger ABI model.
+    CHECK(morok::passes::virtualizeModule(
+        *M,
+        {/*probability=*/100, /*max_functions=*/2,
+         /*max_instructions=*/64, /*max_registers=*/64},
+        rng));
+    CHECK(M->getFunction("morok.vm.caller.exec") == nullptr);
+    CHECK(M->getFunction("morok.vm.callee_add.exec") != nullptr);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("virtualizeModule lifts funnel-shift and min/max intrinsics") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+declare i32 @llvm.fshl.i32(i32, i32, i32)
+declare i32 @llvm.fshr.i32(i32, i32, i32)
+declare i32 @llvm.smax.i32(i32, i32)
+declare i32 @llvm.umin.i32(i32, i32)
+
+define i32 @vm_intrin(i32 %a, i32 %b, i32 %c) {
+entry:
+  %rot = call i32 @llvm.fshl.i32(i32 %a, i32 %a, i32 %c)
+  %ror = call i32 @llvm.fshr.i32(i32 %rot, i32 %b, i32 %c)
+  %mx = call i32 @llvm.smax.i32(i32 %ror, i32 %b)
+  %mn = call i32 @llvm.umin.i32(i32 %mx, i32 %a)
+  ret i32 %mn
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(332);
+    morok::ir::IRRandom rng(engine);
+
+    // Pure scalar intrinsics are expanded inline into existing VM ops, so a
+    // rotate/min/max kernel lifts even though it is expressed as intrinsic
+    // calls in optimized IR.
+    CHECK(morok::passes::virtualizeModule(
+        *M,
+        {/*probability=*/100, /*max_functions=*/1,
+         /*max_instructions=*/128, /*max_registers=*/96},
+        rng));
+
+    Function *Helper = M->getFunction("morok.vm.vm_intrin.exec");
+    REQUIRE(Helper);
+    CHECK(countGlobals(*M, "morok.vm.bytecode") == 1u);
+
+    // No intrinsic call survives anywhere: the wrapper just calls the helper,
+    // and the helper computes the rotates/min/max from primitive ops.
+    std::size_t intrinCalls = 0;
+    for (Function &Fn : *M)
+        for (Instruction &I : instructions(Fn))
+            if (auto *CI = dyn_cast<CallInst>(&I))
+                if (Function *C = CI->getCalledFunction())
+                    intrinCalls += C->getName().starts_with("llvm.") ? 1u : 0u;
+    CHECK(intrinCalls == 0u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
