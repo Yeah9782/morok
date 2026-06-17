@@ -41,7 +41,7 @@ Tags: `[platform · extends <pass> | new]`. All `XL` Windows items presume the
 - [x] Emit direct syscalls for sensitive operations, bypassing libc/`dlsym` wrappers entirely `[posix · new]`
 - [x] Clean-copy byte-diff: fresh-map the on-disk module, apply relocations, byte-compare executable sections to the in-memory image to flag every inline/EAT/IAT patch `[posix · new]`
 - [x] Prologue-pattern hook detector on critical functions (`E9`/`FF25`/`68..C3`/`EB`/`jcc` as first bytes) `[xplat · new]`
-- [ ] Per-function keyed-MAC code baseline verified at runtime to catch mid-body patches `[xplat · extends selfcheck]`
+- [x] Per-function keyed-MAC code baseline verified at runtime to catch mid-body patches `[xplat · extends selfcheck]`
 - [ ] Runtime GOT/PLT validator: verify each entry points inside its owning library's executable range, re-`mprotect` the GOT read-only, poison on deviation (pairs with `-z relro,-z now`) `[linux · new]`
 - [ ] Mach-O `__got`/`__la_symbol_ptr` fixup validator: verify each pointer lands in the expected dylib `__TEXT` `[macos · new]`
 - [ ] VTable integrity: store expected vptr + per-vtable hash and verify before virtual dispatch `[xplat C++ · new]`

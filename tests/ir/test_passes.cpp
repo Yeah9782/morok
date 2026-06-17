@@ -8654,6 +8654,7 @@ define i32 @main() { ret i32 0 }
     Function *Clean = M->getFunction("morok.antihook.clean.elf");
     REQUIRE(Clean != nullptr);
     CHECK(M->getGlobalVariable("morok.antihook.state", true) != nullptr);
+    CHECK(M->getGlobalVariable("morok.antihook.mac.targets", true) != nullptr);
     CHECK(hasInlineAsmCall(*Clean));
     CHECK(M->getFunction("dlsym") != nullptr);
     CHECK(M->getFunction("readlink") == nullptr);
@@ -8663,6 +8664,9 @@ define i32 @main() { ret i32 0 }
     CHECK(M->getFunction("munmap") == nullptr);
     CHECK(M->getFunction("close") == nullptr);
     CHECK(M->getFunction("syscall") == nullptr);
+    CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.mem.mix") >= 1u);
+    CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.file.mix") >=
+          1u);
     CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
                                  "morok.antihook.prologue.x86.hit") >= 1u);
     CHECK_FALSE(hasReadableByteString(*M, "/proc/self/exe"));
@@ -8684,6 +8688,7 @@ define i32 @main() { ret i32 0 }
     Function *Clean = M->getFunction("morok.antihook.clean.macho");
     REQUIRE(Clean != nullptr);
     CHECK(M->getGlobalVariable("morok.antihook.state", true) != nullptr);
+    CHECK(M->getGlobalVariable("morok.antihook.mac.targets", true) != nullptr);
     CHECK(hasInlineAsmCall(*Clean));
     CHECK(M->getFunction("dlsym") == nullptr);
     CHECK(M->getFunction("open") == nullptr);
@@ -8692,6 +8697,9 @@ define i32 @main() { ret i32 0 }
     CHECK(M->getFunction("munmap") == nullptr);
     CHECK(M->getFunction("close") == nullptr);
     CHECK(M->getFunction("syscall") == nullptr);
+    CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.mem.mix") >= 1u);
+    CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.file.mix") >=
+          1u);
     CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
                                  "morok.antihook.prologue.x86.hit") >= 1u);
     CHECK(M->getFunction("_NSGetExecutablePath") != nullptr);

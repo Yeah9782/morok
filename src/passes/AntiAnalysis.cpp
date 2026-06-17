@@ -1377,6 +1377,11 @@ void emitByteDiffLoop(IRBuilder<> &B, Module &M, Function *Fn, Value *MemAddr,
     idx->addIncoming(next, bodyBB);
 }
 
+void emitFunctionMacLoop(IRBuilder<> &B, Module &M, Function *Fn,
+                         Value *MemAddr, Value *CleanPtr, Value *Len,
+                         AllocaInst *Diff, GlobalVariable *Targets,
+                         std::uint64_t Key, BasicBlock *Done);
+
 Function *linuxCleanCopyProbe(Module &M, ir::IRRandom &rng, const Triple &TT) {
     if (!TT.isOSLinux())
         return nullptr;
@@ -1392,6 +1397,10 @@ Function *linuxCleanCopyProbe(Module &M, ir::IRRandom &rng, const Triple &TT) {
     auto *i64 = Type::getInt64Ty(ctx);
     auto *ip = intPtrTy(M);
     auto *ptr = PointerType::getUnqual(ctx);
+    GlobalVariable *macTargets =
+        M.getGlobalVariable("morok.antihook.mac.targets",
+                            /*AllowInternal=*/true);
+    const std::uint64_t macKey = rng.next();
 
     auto *fn = Function::Create(FunctionType::get(i64, false),
                                 GlobalValue::PrivateLinkage,
@@ -1539,7 +1548,11 @@ Function *linuxCleanCopyProbe(Module &M, ir::IRRandom &rng, const Triple &TT) {
     Value *memAddr = PCB.CreateAdd(loadBase, pVaddr, "morok.clean.ph.mem.addr");
     Value *cleanPtr =
         gepI8(PCB, M, mapPtr, pOffset, "morok.clean.ph.clean.ptr");
-    emitByteDiffLoop(PCB, M, fn, memAddr, cleanPtr, pFilesz, diff, phNextBB);
+    auto *afterMacBB = BasicBlock::Create(ctx, "morok.clean.mac.done", fn);
+    emitFunctionMacLoop(PCB, M, fn, memAddr, cleanPtr, pFilesz, diff,
+                        macTargets, macKey, afterMacBB);
+    IRBuilder<> AMB(afterMacBB);
+    emitByteDiffLoop(AMB, M, fn, memAddr, cleanPtr, pFilesz, diff, phNextBB);
 
     IRBuilder<> PNB(phNextBB);
     Value *phNext =
@@ -1556,7 +1569,7 @@ Function *linuxCleanCopyProbe(Module &M, ir::IRRandom &rng, const Triple &TT) {
     return fn;
 }
 
-Function *darwinCleanCopyProbe(Module &M) {
+Function *darwinCleanCopyProbe(Module &M, ir::IRRandom &rng) {
     const Triple TT(M.getTargetTriple());
     if (!TT.isOSDarwin())
         return nullptr;
@@ -1571,6 +1584,10 @@ Function *darwinCleanCopyProbe(Module &M) {
     auto *i64 = Type::getInt64Ty(ctx);
     auto *ip = intPtrTy(M);
     auto *ptr = PointerType::getUnqual(ctx);
+    GlobalVariable *macTargets =
+        M.getGlobalVariable("morok.antihook.mac.targets",
+                            /*AllowInternal=*/true);
+    const std::uint64_t macKey = rng.next();
 
     auto *fn = Function::Create(FunctionType::get(i64, false),
                                 GlobalValue::PrivateLinkage,
@@ -1689,7 +1706,11 @@ Function *darwinCleanCopyProbe(Module &M) {
     Value *memAddr = CCB.CreateAdd(slide, vmaddr, "morok.clean.seg.mem.addr");
     Value *cleanPtr =
         gepI8(CCB, M, mapped, fileoff, "morok.clean.seg.clean.ptr");
-    emitByteDiffLoop(CCB, M, fn, memAddr, cleanPtr, filesize, diff, cmdNextBB);
+    auto *afterMacBB = BasicBlock::Create(ctx, "morok.clean.mac.done", fn);
+    emitFunctionMacLoop(CCB, M, fn, memAddr, cleanPtr, filesize, diff,
+                        macTargets, macKey, afterMacBB);
+    IRBuilder<> AMB(afterMacBB);
+    emitByteDiffLoop(AMB, M, fn, memAddr, cleanPtr, filesize, diff, cmdNextBB);
 
     IRBuilder<> CNB(cmdNextBB);
     Value *nextCmdIdx =
@@ -1713,7 +1734,7 @@ Function *cleanCopyProbe(Module &M, ir::IRRandom &rng, const Triple &TT) {
     if (TT.isOSLinux())
         return linuxCleanCopyProbe(M, rng, TT);
     if (TT.isOSDarwin())
-        return darwinCleanCopyProbe(M);
+        return darwinCleanCopyProbe(M, rng);
     return nullptr;
 }
 
@@ -1806,6 +1827,121 @@ Value *emitArm64ProloguePattern(IRBuilder<> &B, Module &M, Function *Target) {
 
     return B.CreateOr(B.CreateOr(branchImm, branchReg), literalBranch,
                       "morok.antihook.prologue.arm64.hit");
+}
+
+GlobalVariable *functionMacTargetTable(Module &M,
+                                       const std::vector<Function *> &Targets) {
+    if (auto *existing = M.getGlobalVariable("morok.antihook.mac.targets",
+                                             /*AllowInternal=*/true))
+        return existing;
+    if (Targets.empty())
+        return nullptr;
+    LLVMContext &ctx = M.getContext();
+    auto *ptr = PointerType::getUnqual(ctx);
+    auto *arrTy = ArrayType::get(ptr, Targets.size());
+    std::vector<Constant *> init;
+    init.reserve(Targets.size());
+    for (Function *target : Targets)
+        init.push_back(target);
+    auto *gv = new GlobalVariable(
+        M, arrTy, /*isConstant=*/true, GlobalValue::PrivateLinkage,
+        ConstantArray::get(arrTy, init), "morok.antihook.mac.targets");
+    gv->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    return gv;
+}
+
+void mixMacByte(IRBuilder<> &B, Value *&Mac, Value *Byte, std::uint64_t Salt,
+                const Twine &Name) {
+    auto *i64 = B.getInt64Ty();
+    Value *wide = B.CreateZExt(Byte, i64, Name + ".wide");
+    Mac = B.CreateMul(
+        B.CreateXor(B.CreateAdd(Mac, ConstantInt::get(i64, Salt)), wide),
+        ConstantInt::get(i64, 0x100000001B3ULL), Name);
+}
+
+void emitFunctionMacLoop(IRBuilder<> &B, Module &M, Function *Fn,
+                         Value *MemAddr, Value *CleanPtr, Value *Len,
+                         AllocaInst *Diff, GlobalVariable *Targets,
+                         std::uint64_t Key, BasicBlock *Done) {
+    if (!Targets) {
+        B.CreateBr(Done);
+        return;
+    }
+
+    auto *arrTy = dyn_cast<ArrayType>(Targets->getValueType());
+    if (!arrTy || arrTy->getNumElements() == 0) {
+        B.CreateBr(Done);
+        return;
+    }
+
+    LLVMContext &ctx = M.getContext();
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+    constexpr std::uint64_t kWindow = 32;
+
+    auto *loopBB = BasicBlock::Create(ctx, "morok.antihook.mac.loop", Fn);
+    auto *bodyBB = BasicBlock::Create(ctx, "morok.antihook.mac.body", Fn);
+    auto *hashBB = BasicBlock::Create(ctx, "morok.antihook.mac.hash", Fn);
+    auto *nextBB = BasicBlock::Create(ctx, "morok.antihook.mac.next", Fn);
+    B.CreateBr(loopBB);
+
+    IRBuilder<> LB(loopBB);
+    auto *idx = LB.CreatePHI(ip, 2, "morok.antihook.mac.idx");
+    idx->addIncoming(ConstantInt::get(ip, 0), B.GetInsertBlock());
+    LB.CreateCondBr(
+        LB.CreateICmpULT(idx, ConstantInt::get(ip, arrTy->getNumElements())),
+        bodyBB, Done);
+
+    IRBuilder<> BB(bodyBB);
+    Value *slot =
+        BB.CreateInBoundsGEP(arrTy, Targets, {ConstantInt::get(ip, 0), idx},
+                             "morok.antihook.mac.target.slot");
+    Value *target = BB.CreateLoad(ptr, slot, "morok.antihook.mac.target");
+    Value *targetAddr =
+        BB.CreatePtrToInt(target, ip, "morok.antihook.mac.target.addr");
+    Value *windowEnd = BB.CreateAdd(targetAddr, ConstantInt::get(ip, kWindow),
+                                    "morok.antihook.mac.target.end");
+    Value *segEnd = BB.CreateAdd(MemAddr, Len, "morok.antihook.mac.seg.end");
+    Value *inSeg = BB.CreateAnd(
+        BB.CreateICmpUGE(targetAddr, MemAddr),
+        BB.CreateAnd(BB.CreateICmpULE(windowEnd, segEnd),
+                     BB.CreateICmpUGE(Len, ConstantInt::get(ip, kWindow))));
+    BB.CreateCondBr(inSeg, hashBB, nextBB);
+
+    IRBuilder<> HB(hashBB);
+    Value *fileDelta =
+        HB.CreateSub(targetAddr, MemAddr, "morok.antihook.mac.file.delta");
+    Value *fileBase =
+        gepI8(HB, M, CleanPtr, fileDelta, "morok.antihook.mac.file.base");
+    Value *memMac = ConstantInt::get(i64, Key ^ 0xA0761D6478BD642FULL);
+    Value *fileMac = ConstantInt::get(i64, Key ^ 0xA0761D6478BD642FULL);
+    for (std::uint64_t i = 0; i < kWindow; ++i) {
+        Value *memPtr =
+            HB.CreateIntToPtr(HB.CreateAdd(targetAddr, ConstantInt::get(ip, i)),
+                              ptr, "morok.antihook.mac.mem.ptr");
+        auto *memByte =
+            HB.CreateLoad(i8, memPtr, "morok.antihook.mac.mem.byte");
+        memByte->setVolatile(true);
+        Value *fileByte =
+            HB.CreateLoad(i8,
+                          gepI8(HB, M, fileBase, ConstantInt::get(ip, i),
+                                "morok.antihook.mac.file.ptr"),
+                          "morok.antihook.mac.file.byte");
+        std::uint64_t salt = 0x9E3779B97F4A7C15ULL + i * 0xD1B54A32D192ED03ULL;
+        mixMacByte(HB, memMac, memByte, salt, "morok.antihook.mac.mem.mix");
+        mixMacByte(HB, fileMac, fileByte, salt, "morok.antihook.mac.file.mix");
+    }
+    incrementDiff(HB, Diff, HB.CreateICmpNE(memMac, fileMac),
+                  "morok.antihook.mac.diff");
+    HB.CreateBr(nextBB);
+
+    IRBuilder<> NB(nextBB);
+    Value *next =
+        NB.CreateAdd(idx, ConstantInt::get(ip, 1), "morok.antihook.mac.next");
+    NB.CreateBr(loopBB);
+    idx->addIncoming(next, nextBB);
 }
 
 void emitProloguePatternChecks(IRBuilder<> &B, Module &M, const Triple &TT,
@@ -2327,6 +2463,7 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         if (isPrologueProbeCandidate(F))
             prologueTargets.push_back(&F);
     }
+    functionMacTargetTable(M, prologueTargets);
 
     Function *ctor = makeCtorShell(M, "morok.antihook");
     GlobalVariable *state = antiHookState(M, rng);

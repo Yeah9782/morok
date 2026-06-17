@@ -1000,6 +1000,11 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   `EB`, and short/near `jcc` entry patterns into anti-hook state; arm64 targets
   fold unconditional branch, `br`, and `ldr literal x16/x17; br` trampoline
   shapes.
+  The clean-copy helper also carries a private table of selected user-function
+  entries and computes a keyed 32-byte MAC over each function window from live
+  memory and from the freshly mapped image.  Any MAC mismatch is folded into
+  the same delayed anti-hook state, so mid-body patches are caught before the
+  full byte scan reports segment drift.
 - TimingOracle emits a private constructor helper that samples several short
   volatile spans with two clock sources.  x86 targets use serialized `rdtscp`
   paired with a raw OS clock; Darwin targets use `mach_absolute_time` and
