@@ -1077,10 +1077,15 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   `PTRACE_TRACEME` re-arm.  When TrapOracle is enabled, Linux self-tracing is
   omitted so `SIGTRAP` stimuli are delivered to Morok's handler instead of
   job-stopping under the parent shell.  On Linux x86_64, Morok can instead fork
-  a bounded DR sentinel helper before the seccomp filter is installed, authorize
-  that child with `PR_SET_PTRACER`, enumerate `/proc/<pid>/task`, and use
-  direct `PTRACE_SEIZE`/`PTRACE_INTERRUPT`/`PTRACE_POKEUSER` syscalls to zero
-  the verified `u_debugreg[0..7]` slots for every thread.  When that helper is
+  a DR sentinel helper before the seccomp filter is installed, authorize that
+  child with `PR_SET_PTRACER`, enumerate `/proc/<pid>/task`, and use direct
+  `PTRACE_SEIZE`/`PTRACE_INTERRUPT`/`PTRACE_POKEUSER` syscalls to occupy the
+  tracer slot and zero the verified `u_debugreg[0..7]` slots for every thread.
+  The forked child persists while the parent lives, mirrors selected parent code
+  bytes with `PTRACE_PEEKDATA` against its fork-clean copy, and exits on
+  mismatch.  The parent stores the buddy PID and its watchdog checks
+  `kill(pid, 0)` plus `wait4(..., WNOHANG)` with direct syscalls, folding a
+  missing or exited child into the hidden anti-debug state.  When that helper is
   present it replaces the self-trace re-arm path, because a process cannot be
   simultaneously self-traced and scrubbed by a helper tracer.  On macOS
   x86_64/arm64, a pthread watchdog enumerates Mach threads with `task_threads`,
