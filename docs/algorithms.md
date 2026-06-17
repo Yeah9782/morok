@@ -1037,6 +1037,14 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   decoded with a fresh volatile key load immediately before the indirect
   call/invoke.  There is no reusable plaintext function-pointer slot for static
   IAT-style recovery.
+  On Linux x86_64 direct call sites take the stronger exception-mediated path:
+  the site stores a pending request `(FNV-1a(symbol), stack-name, out-slot,
+  continuation blockaddress)`, deliberately faults through inline asm, and a
+  `SIGSEGV` `SA_SIGINFO` handler validates the runtime hash, calls `dlsym`, writes
+  the resolved pointer, and rewrites the saved RIP to the continuation block.
+  The continuation reloads and re-encodes the pointer before the indirect call.
+  Invokes and non-Linux-x86_64 targets keep the normal cloaked `dlsym` path
+  rather than guessing platform-specific exception-context offsets.
 - AntiClassDump / AntiDebugging / AntiHooking / TimingOracle / TrapOracle:
   platform anti-analysis
   (module passes). AntiDebugging combines startup checks with a mutable hidden

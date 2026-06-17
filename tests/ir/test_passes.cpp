@@ -8979,20 +8979,26 @@ define i32 @caller() {
     // a computed stack pointer (an alloca), not a direct global string.
     Function *Caller = M->getFunction("caller");
     REQUIRE(Caller);
-    CallInst *DlsymCall = nullptr;
     bool hasVolatileLoad = false;
-    bool dlsymTakesAlloca = false;
+    bool pendingNameFromAlloca = false;
+    bool hasFaultAsm = false;
     bool indirectUsesDecodedPointer = false;
+    GlobalVariable *PendingName =
+        M->getGlobalVariable("morok.fco.ex.pending.name", true);
+    REQUIRE(PendingName);
     for (Instruction &I : instructions(*Caller)) {
         if (auto *LI = dyn_cast<LoadInst>(&I))
             hasVolatileLoad |= LI->isVolatile();
+        if (auto *SI = dyn_cast<StoreInst>(&I))
+            if (SI->getPointerOperand()->stripPointerCasts() == PendingName)
+                pendingNameFromAlloca |= isa<AllocaInst>(
+                    SI->getValueOperand()->stripInBoundsOffsets());
         if (auto *CI = dyn_cast<CallInst>(&I)) {
             if (Function *Cee = CI->getCalledFunction()) {
-                if (Cee->getName() == "dlsym") {
-                    DlsymCall = CI;
-                    dlsymTakesAlloca |= isa<AllocaInst>(
-                        CI->getArgOperand(1)->stripInBoundsOffsets());
-                }
+                (void)Cee;
+            } else if (auto *Asm = dyn_cast<InlineAsm>(CI->getCalledOperand())) {
+                hasFaultAsm |= Asm->getAsmString().contains(
+                    "movq %rax, (%rax)");
             } else if (auto *I2P =
                            dyn_cast<IntToPtrInst>(CI->getCalledOperand())) {
                 indirectUsesDecodedPointer =
@@ -9000,15 +9006,22 @@ define i32 @caller() {
             }
         }
     }
-    REQUIRE(DlsymCall != nullptr);
-    for (User *U : DlsymCall->users())
-        CHECK(isa<PtrToIntInst>(U));
+    Function *Handler = M->getFunction("morok.fco.ex.handler");
+    REQUIRE(Handler);
+    CHECK(countCallsTo(*Handler, "dlsym") == 1u);
+    CHECK(M->getFunction("morok.fco.ex.install") != nullptr);
+    CHECK(M->getGlobalVariable("morok.fco.ex.pending.hash", true) != nullptr);
+    CHECK(M->getGlobalVariable("morok.fco.ex.pending.out", true) != nullptr);
+    CHECK(M->getGlobalVariable("morok.fco.ex.pending.cont", true) != nullptr);
+    CHECK(countNamedInstructions(*Handler, "morok.fco.ex.hash") >= 1u);
     CHECK(hasVolatileLoad);
-    CHECK(dlsymTakesAlloca);
+    CHECK(pendingNameFromAlloca);
+    CHECK(hasFaultAsm);
     CHECK(indirectUsesDecodedPointer);
     CHECK(countInlineAsmCalls(*Caller) >= 2u);
     CHECK(countNamedAllocas(*Caller, "morok.cloak.mix") >= 1u);
     CHECK(countNamedAllocas(*Caller, "morok.fco.ptr.slot") == 1u);
+    CHECK(countNamedAllocas(*Caller, "morok.fco.ex.slot") == 1u);
     CHECK(countNamedInstructions(*Caller, "morok.fco.ptr.enc") >= 1u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
