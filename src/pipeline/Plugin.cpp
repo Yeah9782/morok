@@ -240,6 +240,10 @@ PassPluginLibraryInfo getPluginInfo() {
                             MPM.addPass(passes::WindowsPebHeapDebugPass());
                             return true;
                         }
+                        if (name == "morok-windbgobj") {
+                            MPM.addPass(passes::WindowsDebugObjectPass());
+                            return true;
+                        }
                         if (name == "morok-timing") {
                             MPM.addPass(passes::TimingOraclePass());
                             return true;

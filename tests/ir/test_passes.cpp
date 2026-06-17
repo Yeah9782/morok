@@ -10628,6 +10628,54 @@ define i32 @main() { ret i32 0 }
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("windowsDebugObjectModule emits hashed NT debug object probes") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-pc-windows-msvc"
+define i32 @main() { ret i32 0 }
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(7108);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::windowsDebugObjectModule(*M, rng));
+
+    Function *Ctor = M->getFunction("morok.win.dbgobj");
+    Function *Probe = M->getFunction("morok.win.dbgobj.probe");
+    Function *Peb = M->getFunction("morok.win.peb");
+    Function *Resolve = M->getFunction("morok.win.pe.resolve");
+    Function *Ldr = M->getFunction("morok.win.ldr.module");
+    Function *WideHash = M->getFunction("morok.win.wide.hash");
+    REQUIRE(Ctor != nullptr);
+    REQUIRE(Probe != nullptr);
+    REQUIRE(Peb != nullptr);
+    REQUIRE(Resolve != nullptr);
+    REQUIRE(Ldr != nullptr);
+    REQUIRE(WideHash != nullptr);
+    CHECK(M->getGlobalVariable("morok.win.state", true) != nullptr);
+    CHECK(M->getFunction("NtQueryInformationProcess") == nullptr);
+    CHECK(M->getFunction("NtQueryObject") == nullptr);
+    CHECK(hasInlineAsmCall(*Peb));
+    CHECK(countNamedInstructions(*Ldr, "morok.win.ldr.name.hash") >= 1u);
+    CHECK(countNamedInstructions(*WideHash, "morok.win.wide.lower") >= 1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.dbgobj.ntdll") >= 1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.dbgobj.ntqip") >= 1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.dbgobj.ntqo") >= 1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.win.dbgobj.debug.port.status") >= 1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.win.dbgobj.debug.object.status") >= 1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.win.dbgobj.debug.flags.status") >= 1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.win.dbgobj.object.types.status") >= 1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.win.dbgobj.object.type.hash") >= 1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.win.dbgobj.object.debug.count.final") >=
+          1u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("timingOracleModule emits x86 rdtscp and raw clock probes") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(

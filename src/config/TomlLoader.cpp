@@ -454,6 +454,8 @@ void parsePasses(const toml::table &p, PassConfig &pc) {
         parseToggle(*t, pc.windows_pe_foundation);
     if (auto *t = p["windows_peb_heap_debug"].as_table())
         parseToggle(*t, pc.windows_peb_heap_debug);
+    if (auto *t = p["windows_debug_object"].as_table())
+        parseToggle(*t, pc.windows_debug_object);
     if (auto *t = p["timing_oracles"].as_table())
         parseToggle(*t, pc.timing_oracles);
     if (auto *t = p["trap_oracles"].as_table())

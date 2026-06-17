@@ -385,6 +385,8 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
         changed |= passes::windowsPeFoundationModule(M, rng);
     if (config_.passes.windows_peb_heap_debug.enabled.value_or(false))
         changed |= passes::windowsPebHeapDebugModule(M, rng);
+    if (config_.passes.windows_debug_object.enabled.value_or(false))
+        changed |= passes::windowsDebugObjectModule(M, rng);
     if (config_.passes.anti_dbg.enabled.value_or(false))
         changed |= passes::antiDebuggingModule(
             M, rng, !config_.passes.trap_oracles.enabled.value_or(false));
