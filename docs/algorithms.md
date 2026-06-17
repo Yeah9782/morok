@@ -1137,6 +1137,12 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   individually, so the helper returns a bounded score and folds only
   multi-signal suspicion into delayed anti-hook state instead of exiting at the
   probe site.
+  AntiHooking also extends the address-space census into an anti-DBI battery:
+  return-address origin checks reject code-cache callers, Darwin/Windows VM
+  scans flag large RWX regions, Linux scans cloaked `/proc/self/maps`,
+  `/proc/net/tcp`, and current-thread names for Frida-style signatures without
+  embedding readable signature strings, and a cold SMC tripwire touches a code
+  page through a volatile gate to stress DBI code-cache coherence.
 - TimingOracle emits a private constructor helper that samples several short
   volatile spans with two clock sources.  x86 targets use serialized `rdtscp`
   paired with a raw OS clock; Darwin targets use `mach_absolute_time` and

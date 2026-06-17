@@ -3590,6 +3590,9 @@ Function *darwinVmCensusProbe(Module &M) {
         NB.CreateICmpNE(NB.CreateAnd(prot, ConstantInt::get(i32, 4)),
                         ConstantInt::get(i32, 0));
     Value *rwx = NB.CreateAnd(writable, executable, "morok.antihook.vm.rwx");
+    Value *largeRwx = NB.CreateAnd(
+        rwx, NB.CreateICmpUGE(regionSize, ConstantInt::get(i64, 0x1000000)),
+        "morok.antihook.vm.rwx.large");
     Value *noAccess = NB.CreateICmpEQ(prot, ConstantInt::get(i32, 0),
                                       "morok.antihook.vm.noaccess");
     Value *textHit =
@@ -3602,6 +3605,7 @@ Function *darwinVmCensusProbe(Module &M) {
         NB.CreateOr(NB.CreateNot(readable), NB.CreateOr(writable, NB.CreateNot(executable))),
         "morok.antihook.vm.text.prot");
     incrementDiff(NB, diff, rwx, "morok.antihook.vm.rwx.hit");
+    incrementDiff(NB, diff, largeRwx, "morok.antihook.vm.rwx.large.hit");
     incrementDiff(NB, diff, noAccess, "morok.antihook.vm.noaccess.hit");
     incrementDiff(NB, diff, privateExec, "morok.antihook.vm.private.hit");
     incrementDiff(NB, diff, textWrongProt, "morok.antihook.vm.text.hit");
@@ -3695,6 +3699,9 @@ Function *windowsVirtualQueryCensusProbe(Module &M) {
     Value *rwx =
         NB.CreateICmpNE(NB.CreateAnd(protect, ConstantInt::get(i32, 0xC0)),
                         ConstantInt::get(i32, 0), "morok.antihook.win.rwx");
+    Value *largeRwx = NB.CreateAnd(
+        rwx, NB.CreateICmpUGE(regionSize, ConstantInt::get(ip, 0x1000000)),
+        "morok.antihook.win.rwx.large");
     Value *exec =
         NB.CreateICmpNE(NB.CreateAnd(protect, ConstantInt::get(i32, 0xF0)),
                         ConstantInt::get(i32, 0), "morok.antihook.win.exec");
@@ -3707,6 +3714,8 @@ Function *windowsVirtualQueryCensusProbe(Module &M) {
                   "morok.antihook.win.noaccess.hit");
     incrementDiff(NB, diff, NB.CreateAnd(committed, rwx),
                   "morok.antihook.win.rwx.hit");
+    incrementDiff(NB, diff, NB.CreateAnd(committed, largeRwx),
+                  "morok.antihook.win.rwx.large.hit");
     incrementDiff(NB, diff, NB.CreateAnd(NB.CreateAnd(committed, exec), isPrivate),
                   "morok.antihook.win.private.hit");
     Value *step = NB.CreateSelect(NB.CreateICmpUGT(regionSize, ConstantInt::get(ip, 0)),
@@ -4611,6 +4620,300 @@ Function *sandboxHeuristicProbe(Module &M, const Triple &TT) {
     return fn;
 }
 
+Value *bufferHasLiteral(IRBuilder<> &B, Module &M, AllocaInst *Buf, Value *N,
+                        std::initializer_list<unsigned char> Literal,
+                        std::uint64_t MaxBytes, const Twine &Name) {
+    LLVMContext &ctx = M.getContext();
+    Function *fn = B.GetInsertBlock()->getParent();
+    auto *i1 = Type::getInt1Ty(ctx);
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *ip = intPtrTy(M);
+    if (Literal.size() == 0 || MaxBytes < Literal.size())
+        return ConstantInt::getFalse(ctx);
+
+    std::vector<unsigned char> bytes(Literal.begin(), Literal.end());
+    auto *foundSlot = B.CreateAlloca(i1, nullptr, Name + ".found");
+    auto *idxSlot = B.CreateAlloca(ip, nullptr, Name + ".idx.slot");
+    B.CreateStore(ConstantInt::getFalse(ctx), foundSlot)->setVolatile(true);
+    B.CreateStore(ConstantInt::get(ip, 0), idxSlot)->setVolatile(true);
+
+    auto *loopBB = BasicBlock::Create(ctx, (Name + ".loop").str(), fn);
+    auto *bodyBB = BasicBlock::Create(ctx, (Name + ".body").str(), fn);
+    auto *hitBB = BasicBlock::Create(ctx, (Name + ".hit").str(), fn);
+    auto *nextBB = BasicBlock::Create(ctx, (Name + ".next").str(), fn);
+    auto *doneBB = BasicBlock::Create(ctx, (Name + ".done").str(), fn);
+    B.CreateBr(loopBB);
+
+    IRBuilder<> LB(loopBB);
+    auto *found = LB.CreateLoad(i1, foundSlot, Name + ".found.v");
+    found->setVolatile(true);
+    auto *idx = LB.CreateLoad(ip, idxSlot, Name + ".idx");
+    idx->setVolatile(true);
+    Value *end = LB.CreateAdd(idx, ConstantInt::get(ip, bytes.size()),
+                              Name + ".end");
+    Value *withinRead = LB.CreateICmpSLE(end, N, Name + ".within.read");
+    Value *withinBuf = LB.CreateICmpULE(end, ConstantInt::get(ip, MaxBytes),
+                                        Name + ".within.buf");
+    LB.CreateCondBr(LB.CreateAnd(LB.CreateAnd(withinRead, withinBuf),
+                                 LB.CreateNot(found)),
+                    bodyBB, doneBB);
+
+    IRBuilder<> MB(bodyBB);
+    Value *match = ConstantInt::getTrue(ctx);
+    for (std::uint64_t j = 0; j < bytes.size(); ++j) {
+        Value *ch = loadAt(MB, M, i8, Buf,
+                           MB.CreateAdd(idx, ConstantInt::get(ip, j)),
+                           Name + ".ch");
+        match = MB.CreateAnd(
+            match, MB.CreateICmpEQ(ch, ConstantInt::get(i8, bytes[j])),
+            Name + ".match");
+    }
+    MB.CreateCondBr(match, hitBB, nextBB);
+
+    IRBuilder<> HB(hitBB);
+    HB.CreateStore(ConstantInt::getTrue(ctx), foundSlot)->setVolatile(true);
+    HB.CreateBr(doneBB);
+
+    IRBuilder<> NB(nextBB);
+    NB.CreateStore(NB.CreateAdd(idx, ConstantInt::get(ip, 1), Name + ".idx.next"),
+                   idxSlot)
+        ->setVolatile(true);
+    NB.CreateBr(loopBB);
+
+    B.SetInsertPoint(doneBB);
+    auto *out = B.CreateLoad(i1, foundSlot, Name + ".out");
+    out->setVolatile(true);
+    return out;
+}
+
+GlobalVariable *dbiSmcGate(Module &M) {
+    if (auto *existing = M.getGlobalVariable("morok.antihook.dbi.smc.gate",
+                                             /*AllowInternal=*/true))
+        return existing;
+    auto *i8 = Type::getInt8Ty(M.getContext());
+    auto *gv = new GlobalVariable(
+        M, i8, /*isConstant=*/false, GlobalValue::PrivateLinkage,
+        ConstantInt::get(i8, 0), "morok.antihook.dbi.smc.gate");
+    gv->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    return gv;
+}
+
+Function *dbiSmcTarget(Module &M) {
+    if (Function *existing = M.getFunction("morok.antihook.dbi.smc.target"))
+        return existing;
+    auto *i32 = Type::getInt32Ty(M.getContext());
+    auto *fn = Function::Create(FunctionType::get(i32, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antihook.dbi.smc.target", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+    auto *entry = BasicBlock::Create(M.getContext(), "entry", fn);
+    IRBuilder<> B(entry);
+    B.CreateRet(ConstantInt::get(i32, 0x13579BDFu));
+    return fn;
+}
+
+Function *dbiSmcTripwireProbe(Module &M, const Triple &TT) {
+    if (Function *existing = M.getFunction("morok.antihook.dbi.smc"))
+        return existing;
+    if (intPtrTy(M)->getBitWidth() != 64)
+        return nullptr;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+    Function *target = dbiSmcTarget(M);
+
+    auto *fn = Function::Create(FunctionType::get(i64, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antihook.dbi.smc", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    auto *hotBB = BasicBlock::Create(ctx, "hot", fn);
+    auto *retBB = BasicBlock::Create(ctx, "ret", fn);
+
+    IRBuilder<> B(entry);
+    AllocaInst *diff = B.CreateAlloca(i64, nullptr, "morok.antihook.dbi.smc.diff");
+    B.CreateStore(ConstantInt::get(i64, 0), diff)->setVolatile(true);
+    auto *gate = B.CreateLoad(i8, dbiSmcGate(M), "morok.antihook.dbi.smc.load");
+    gate->setVolatile(true);
+    B.CreateCondBr(B.CreateICmpNE(gate, ConstantInt::get(i8, 0),
+                                  "morok.antihook.dbi.smc.armed"),
+                   hotBB, retBB);
+
+    IRBuilder<> HB(hotBB);
+    Value *targetAddr = HB.CreatePtrToInt(target, ip, "morok.antihook.dbi.smc.addr");
+    Value *page = HB.CreateAnd(targetAddr, ConstantInt::get(ip, ~0xfffULL),
+                               "morok.antihook.dbi.smc.page");
+    Value *codePtr = HB.CreateIntToPtr(targetAddr, ptr, "morok.antihook.dbi.smc.ptr");
+    if (TT.isOSLinux()) {
+        Value *rc = emitLinuxMprotect(HB, M, TT, page, ConstantInt::get(ip, 4096),
+                                      ConstantInt::get(i32, 7));
+        rc->setName("morok.antihook.dbi.smc.mprotect.rwx");
+    } else if (TT.isOSDarwin()) {
+        Value *rc = emitDarwinMprotect(HB, M, TT, page, ConstantInt::get(ip, 4096),
+                                       ConstantInt::get(i32, 7));
+        rc->setName("morok.antihook.dbi.smc.mprotect.rwx");
+    } else if (TT.isOSWindows()) {
+        auto *oldProt = HB.CreateAlloca(i32, nullptr, "morok.antihook.dbi.smc.old");
+        FunctionCallee virtualProtect = M.getOrInsertFunction(
+            "VirtualProtect", FunctionType::get(i32, {ptr, ip, i32, ptr}, false));
+        HB.CreateCall(virtualProtect,
+                      {HB.CreateIntToPtr(page, ptr), ConstantInt::get(ip, 4096),
+                       ConstantInt::get(i32, 0x40), oldProt},
+                      "morok.antihook.dbi.smc.virtualprotect.rwx");
+    }
+
+    auto *oldByte = HB.CreateLoad(i8, codePtr, "morok.antihook.dbi.smc.byte");
+    oldByte->setVolatile(true);
+    auto *touch = HB.CreateStore(oldByte, codePtr);
+    touch->setVolatile(true);
+    if (TT.isOSLinux()) {
+        Value *rc = emitLinuxMprotect(HB, M, TT, page, ConstantInt::get(ip, 4096),
+                                      ConstantInt::get(i32, 5));
+        rc->setName("morok.antihook.dbi.smc.mprotect.rx");
+    } else if (TT.isOSDarwin()) {
+        Value *rc = emitDarwinMprotect(HB, M, TT, page, ConstantInt::get(ip, 4096),
+                                       ConstantInt::get(i32, 5));
+        rc->setName("morok.antihook.dbi.smc.mprotect.rx");
+    } else if (TT.isOSWindows()) {
+        auto *oldProt2 =
+            HB.CreateAlloca(i32, nullptr, "morok.antihook.dbi.smc.old2");
+        FunctionCallee virtualProtect = M.getOrInsertFunction(
+            "VirtualProtect", FunctionType::get(i32, {ptr, ip, i32, ptr}, false));
+        HB.CreateCall(virtualProtect,
+                      {HB.CreateIntToPtr(page, ptr), ConstantInt::get(ip, 4096),
+                       ConstantInt::get(i32, 0x20), oldProt2},
+                      "morok.antihook.dbi.smc.virtualprotect.rx");
+    }
+    Value *result = HB.CreateCall(target, {}, "morok.antihook.dbi.smc.result");
+    incrementDiff(HB, diff,
+                  HB.CreateICmpNE(result, ConstantInt::get(i32, 0x13579BDFu),
+                                  "morok.antihook.dbi.smc.trip"),
+                  "morok.antihook.dbi.smc.trip");
+    HB.CreateBr(retBB);
+
+    IRBuilder<> RB(retBB);
+    emitRetDiff(RB, diff);
+    return fn;
+}
+
+Function *linuxDbiSignatureProbe(Module &M, ir::IRRandom &rng,
+                                 const Triple &TT) {
+    if (!TT.isOSLinux() || intPtrTy(M)->getBitWidth() != 64)
+        return nullptr;
+    if (Function *existing = M.getFunction("morok.antihook.dbi.linux"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *ip = intPtrTy(M);
+
+    auto *fn = Function::Create(FunctionType::get(i64, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antihook.dbi.linux", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    auto *afterMapsBB = BasicBlock::Create(ctx, "after.maps", fn);
+    auto *retBB = BasicBlock::Create(ctx, "ret", fn);
+
+    IRBuilder<> B(entry);
+    AllocaInst *diff = B.CreateAlloca(i64, nullptr, "morok.antihook.dbi.diff");
+    B.CreateStore(ConstantInt::get(i64, 0), diff)->setVolatile(true);
+    ReadFileIR maps =
+        emitReadSmallFile(B, M, fn, "/proc/self/maps", 8192, rng, TT);
+
+    IRBuilder<> MFB(maps.ret0);
+    MFB.CreateBr(afterMapsBB);
+
+    IRBuilder<> MB(maps.afterRead);
+    Value *mapSig0 = bufferHasLiteral(
+        MB, M, maps.buf, maps.n,
+        {0x66, 0x72, 0x69, 0x64, 0x61}, 8192,
+        "morok.antihook.dbi.maps.sig0");
+    Value *mapSig1 = bufferHasLiteral(
+        MB, M, maps.buf, maps.n,
+        {0x67, 0x61, 0x64, 0x67, 0x65, 0x74}, 8192,
+        "morok.antihook.dbi.maps.sig1");
+    Value *mapSig2 = bufferHasLiteral(
+        MB, M, maps.buf, maps.n,
+        {0x72, 0x65, 0x2e, 0x66, 0x72, 0x69, 0x64, 0x61}, 8192,
+        "morok.antihook.dbi.maps.sig2");
+    Value *mapSig = MB.CreateOr(MB.CreateOr(mapSig0, mapSig1), mapSig2,
+                                "morok.antihook.dbi.maps.sig");
+    incrementDiff(MB, diff, mapSig, "morok.antihook.dbi.maps");
+    MB.CreateBr(afterMapsBB);
+
+    IRBuilder<> TB(afterMapsBB);
+    auto *nameTy = ArrayType::get(i8, 16);
+    AllocaInst *name =
+        TB.CreateAlloca(nameTy, nullptr, "morok.antihook.dbi.thread.name");
+    Value *namePtr = TB.CreateInBoundsGEP(
+        nameTy, name, {ConstantInt::get(ip, 0), ConstantInt::get(ip, 0)},
+        "morok.antihook.dbi.thread.ptr");
+    for (unsigned i = 0; i < 16; ++i)
+        TB.CreateStore(ConstantInt::get(i8, 0),
+                       TB.CreateInBoundsGEP(nameTy, name,
+                                            {ConstantInt::get(ip, 0),
+                                             ConstantInt::get(ip, i)}));
+    std::uint32_t ptraceNr = 0;
+    std::uint32_t prctlNr = 0;
+    std::uint32_t openatNr = 0;
+    std::uint32_t readNr = 0;
+    std::uint32_t closeNr = 0;
+    if (linuxCoreSyscalls(TT, ptraceNr, prctlNr, openatNr, readNr, closeNr)) {
+        emitLinuxSyscall(TB, M, TT, prctlNr,
+                         {ConstantInt::get(i32, 16), namePtr,
+                          ConstantInt::get(ip, 0), ConstantInt::get(ip, 0),
+                          ConstantInt::get(ip, 0)});
+    }
+    Value *threadSig0 = bufferHasLiteral(
+        TB, M, name, ConstantInt::get(ip, 16),
+        {0x67, 0x75, 0x6d, 0x2d, 0x6a, 0x73, 0x2d, 0x6c, 0x6f, 0x6f, 0x70},
+        16, "morok.antihook.dbi.thread.sig0");
+    Value *threadSig1 = bufferHasLiteral(
+        TB, M, name, ConstantInt::get(ip, 16),
+        {0x67, 0x6d, 0x61, 0x69, 0x6e}, 16,
+        "morok.antihook.dbi.thread.sig1");
+    Value *threadSig2 = bufferHasLiteral(
+        TB, M, name, ConstantInt::get(ip, 16),
+        {0x66, 0x72, 0x69, 0x64, 0x61, 0x2d, 0x61, 0x67, 0x65, 0x6e, 0x74},
+        16, "morok.antihook.dbi.thread.sig2");
+    Value *threadSig =
+        TB.CreateOr(TB.CreateOr(threadSig0, threadSig1), threadSig2,
+                    "morok.antihook.dbi.thread.sig");
+    incrementDiff(TB, diff, threadSig, "morok.antihook.dbi.thread");
+
+    ReadFileIR tcp = emitReadSmallFile(TB, M, fn, "/proc/net/tcp", 4096, rng, TT);
+
+    IRBuilder<> TFB(tcp.ret0);
+    TFB.CreateBr(retBB);
+
+    IRBuilder<> PB(tcp.afterRead);
+    Value *portSig0 = bufferHasLiteral(
+        PB, M, tcp.buf, tcp.n, {0x36, 0x39, 0x41, 0x32}, 4096,
+        "morok.antihook.dbi.port.sig0");
+    Value *portSig1 = bufferHasLiteral(
+        PB, M, tcp.buf, tcp.n, {0x36, 0x39, 0x61, 0x32}, 4096,
+        "morok.antihook.dbi.port.sig1");
+    incrementDiff(PB, diff, PB.CreateOr(portSig0, portSig1),
+                  "morok.antihook.dbi.port");
+    PB.CreateBr(retBB);
+
+    IRBuilder<> RB(retBB);
+    emitRetDiff(RB, diff);
+    return fn;
+}
+
 void emitProloguePatternChecks(IRBuilder<> &B, Module &M, const Triple &TT,
                                GlobalVariable *State,
                                const std::vector<Function *> &Targets,
@@ -5311,6 +5614,22 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         foldFlag(B, state,
                  B.CreateICmpUGE(score, ConstantInt::get(B.getInt64Ty(), 2)),
                  0x4E87A61D39C205B3ULL, "morok.antihook.sandbox.changed");
+    }
+    if (Function *smc = dbiSmcTripwireProbe(M, tt)) {
+        Value *diff = B.CreateCall(smc, {}, "morok.antihook.dbi.smc.diff");
+        foldState(B, state, diff, 0xE62D41B98A3F570CULL,
+                  "morok.antihook.dbi.smc");
+        foldFlag(B, state,
+                 B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0)),
+                 0x73B5D02E6C49A18FULL, "morok.antihook.dbi.smc.changed");
+    }
+    if (Function *dbi = linuxDbiSignatureProbe(M, rng, tt)) {
+        Value *diff = B.CreateCall(dbi, {}, "morok.antihook.dbi.diff");
+        foldState(B, state, diff, 0x1B89E4C76F20DA53ULL,
+                  "morok.antihook.dbi");
+        foldFlag(B, state,
+                 B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0)),
+                 0xF4A7812C39D60E5BULL, "morok.antihook.dbi.changed");
     }
     insertStackOriginChecks(M, stackOriginCheck(M), state, prologueTargets, rng);
     emitProloguePatternChecks(B, M, tt, state, prologueTargets, rng);

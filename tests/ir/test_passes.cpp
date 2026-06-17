@@ -9022,6 +9022,10 @@ entry:
     REQUIRE(Diverge != nullptr);
     Function *Sandbox = M->getFunction("morok.antihook.sandbox");
     REQUIRE(Sandbox != nullptr);
+    Function *Dbi = M->getFunction("morok.antihook.dbi.linux");
+    REQUIRE(Dbi != nullptr);
+    Function *Smc = M->getFunction("morok.antihook.dbi.smc");
+    REQUIRE(Smc != nullptr);
     Function *Work = M->getFunction("work");
     REQUIRE(Work != nullptr);
     CHECK(M->getGlobalVariable("morok.antihook.state", true) != nullptr);
@@ -9083,6 +9087,13 @@ entry:
                                  "morok.antihook.sandbox.uptime.flag") >= 1u);
     CHECK(countNamedInstructions(*Sandbox,
                                  "morok.antihook.sandbox.sleep.skip") >= 1u);
+    CHECK(countNamedInstructions(*Dbi, "morok.antihook.dbi.maps.sig") >= 1u);
+    CHECK(countNamedInstructions(*Dbi, "morok.antihook.dbi.thread.sig") >= 1u);
+    CHECK(countNamedInstructions(*Dbi, "morok.antihook.dbi.port.sig0") >= 1u);
+    CHECK(countNamedInstructions(*Smc,
+                                 "morok.antihook.dbi.smc.mprotect.rwx") >=
+          1u);
+    CHECK(countNamedInstructions(*Smc, "morok.antihook.dbi.smc.trip") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.ra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.bad") >= 1u);
     CHECK(countNamedInstructions(*Maps, "morok.antihook.maps.rwx") >= 1u);
@@ -9134,6 +9145,8 @@ entry:
     REQUIRE(Diverge != nullptr);
     Function *Sandbox = M->getFunction("morok.antihook.sandbox");
     REQUIRE(Sandbox != nullptr);
+    Function *Smc = M->getFunction("morok.antihook.dbi.smc");
+    REQUIRE(Smc != nullptr);
     Function *Work = M->getFunction("work");
     REQUIRE(Work != nullptr);
     CHECK(M->getGlobalVariable("morok.antihook.state", true) != nullptr);
@@ -9176,9 +9189,14 @@ entry:
           1u);
     CHECK(countNamedInstructions(*Sandbox,
                                  "morok.antihook.sandbox.sidt.base") >= 1u);
+    CHECK(countNamedInstructions(*Smc,
+                                 "morok.antihook.dbi.smc.mprotect.rwx") >=
+          1u);
+    CHECK(countNamedInstructions(*Smc, "morok.antihook.dbi.smc.trip") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.ra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.bad") >= 1u);
     CHECK(countNamedInstructions(*Vm, "morok.antihook.vm.rwx") >= 1u);
+    CHECK(countNamedInstructions(*Vm, "morok.antihook.vm.rwx.large") >= 1u);
     CHECK(countNamedInstructions(*Vm, "morok.antihook.vm.private.exec") >= 1u);
     CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
                                  "morok.antihook.prologue.x86.hit") >= 1u);
@@ -9222,6 +9240,8 @@ entry:
     REQUIRE(Stack != nullptr);
     Function *Sandbox = M->getFunction("morok.antihook.sandbox");
     REQUIRE(Sandbox != nullptr);
+    Function *Smc = M->getFunction("morok.antihook.dbi.smc");
+    REQUIRE(Smc != nullptr);
     Function *Work = M->getFunction("work");
     REQUIRE(Work != nullptr);
     CHECK(M->getFunction("VirtualQuery") != nullptr);
@@ -9236,12 +9256,17 @@ entry:
           1u);
     CHECK(countNamedInstructions(*Sandbox,
                                  "morok.antihook.sandbox.sidt.base") >= 1u);
+    CHECK(countNamedInstructions(*Smc,
+                                 "morok.antihook.dbi.smc.virtualprotect.rwx") >=
+          1u);
+    CHECK(countNamedInstructions(*Smc, "morok.antihook.dbi.smc.trip") >= 1u);
     CHECK(countNamedInstructions(*Wx, "morok.antihook.wxorx.virtualprotect") >=
           1u);
     CHECK(countNamedInstructions(*Stack, "morok.antihook.stack.query") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.ra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.bad") >= 1u);
     CHECK(countNamedInstructions(*Vm, "morok.antihook.win.rwx") >= 1u);
+    CHECK(countNamedInstructions(*Vm, "morok.antihook.win.rwx.large") >= 1u);
     CHECK(countNamedInstructions(*Vm, "morok.antihook.win.private") >= 1u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
