@@ -244,6 +244,10 @@ PassPluginLibraryInfo getPluginInfo() {
                             MPM.addPass(passes::WindowsDebugObjectPass());
                             return true;
                         }
+                        if (name == "morok-winthide") {
+                            MPM.addPass(passes::WindowsThreadHidePass());
+                            return true;
+                        }
                         if (name == "morok-timing") {
                             MPM.addPass(passes::TimingOraclePass());
                             return true;

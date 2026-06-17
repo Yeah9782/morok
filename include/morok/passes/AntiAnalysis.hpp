@@ -12,6 +12,7 @@
 //   • WindowsPEFoundation — emits reusable Windows PEB/TEB, PE, syscall, VEH helpers.
 //   • WindowsPebHeapDebug — samples Windows PEB/heap debug fields directly.
 //   • WindowsDebugObject — queries Windows debug port/object/flags by NT API.
+//   • WindowsThreadHide — applies ThreadHideFromDebugger to current threads.
 //   • TimingOracle   — samples independent clocks around short spans.
 //   • TrapOracle     — checks whether SIGTRAP/int3-style traps reach the app.
 //   • PageFaultTlbOracle — samples protected-page fault delivery and latency.
@@ -72,6 +73,13 @@ bool windowsPebHeapDebugModule(llvm::Module &M, morok::ir::IRRandom &rng);
 /// DebugObjectHandle, DebugFlags, and ObjectTypesInformation DebugObject
 /// evidence into hidden Windows state.  Returns true if code was added.
 bool windowsDebugObjectModule(llvm::Module &M, morok::ir::IRRandom &rng);
+
+/// Inject Windows x86_64 thread-hide checks.  The emitted startup probe resolves
+/// NtGetNextThread, NtSetInformationThread, NtQueryInformationThread, and
+/// NtClose by export hash, applies ThreadHideFromDebugger to each current
+/// thread, then queries the class back and folds failures into hidden state.
+/// Returns true if code was added.
+bool windowsThreadHideModule(llvm::Module &M, morok::ir::IRRandom &rng);
 
 /// Inject a runtime timing oracle.  The emitted helper samples independent
 /// clocks around short deterministic spans and folds distribution-level
@@ -162,6 +170,19 @@ class WindowsDebugObjectPass
     : public llvm::PassInfoMixin<WindowsDebugObjectPass> {
 public:
     explicit WindowsDebugObjectPass(std::uint64_t seed = 0xD3B60B1Eu)
+        : engine_(core::Xoshiro256pp::fromSeed(seed)) {}
+
+    llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &);
+    static bool isRequired() { return true; }
+
+private:
+    core::Xoshiro256pp engine_;
+};
+
+class WindowsThreadHidePass
+    : public llvm::PassInfoMixin<WindowsThreadHidePass> {
+public:
+    explicit WindowsThreadHidePass(std::uint64_t seed = 0x71D1E11Du)
         : engine_(core::Xoshiro256pp::fromSeed(seed)) {}
 
     llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &);

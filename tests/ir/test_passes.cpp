@@ -10676,6 +10676,51 @@ define i32 @main() { ret i32 0 }
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("windowsThreadHideModule emits all-thread hide/query probes") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-pc-windows-msvc"
+define i32 @main() { ret i32 0 }
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(7119);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::windowsThreadHideModule(*M, rng));
+
+    Function *Ctor = M->getFunction("morok.win.thide");
+    Function *Probe = M->getFunction("morok.win.thide.probe");
+    Function *Peb = M->getFunction("morok.win.peb");
+    Function *Resolve = M->getFunction("morok.win.pe.resolve");
+    Function *Ldr = M->getFunction("morok.win.ldr.module");
+    REQUIRE(Ctor != nullptr);
+    REQUIRE(Probe != nullptr);
+    REQUIRE(Peb != nullptr);
+    REQUIRE(Resolve != nullptr);
+    REQUIRE(Ldr != nullptr);
+    CHECK(M->getGlobalVariable("morok.win.state", true) != nullptr);
+    CHECK(M->getFunction("NtGetNextThread") == nullptr);
+    CHECK(M->getFunction("NtSetInformationThread") == nullptr);
+    CHECK(M->getFunction("NtQueryInformationThread") == nullptr);
+    CHECK(M->getFunction("NtClose") == nullptr);
+    CHECK(hasInlineAsmCall(*Peb));
+    CHECK(countNamedInstructions(*Probe, "morok.win.thide.ntgetnextthread") >=
+          1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.win.thide.ntsetinformationthread") >=
+          1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.win.thide.ntqueryinformationthread") >=
+          1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.thide.getnext.status") >=
+          1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.thide.set.status") >= 1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.thide.query.status") >=
+          1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.thide.hidden") >= 1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.thide.fail.final") >= 1u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("timingOracleModule emits x86 rdtscp and raw clock probes") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(

@@ -8894,6 +8894,263 @@ Function *windowsDebugObjectProbe(Module &M, GlobalVariable *State,
     return fn;
 }
 
+Function *windowsThreadHideProbe(Module &M, GlobalVariable *State,
+                                 ir::IRRandom &rng, const Triple &TT) {
+    if (!TT.isOSWindows() || TT.getArch() != Triple::x86_64 ||
+        intPtrTy(M)->getBitWidth() != 64)
+        return nullptr;
+    if (Function *existing = M.getFunction("morok.win.thide.probe"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+    auto *fn = Function::Create(FunctionType::get(Type::getVoidTy(ctx), false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.win.thide.probe", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+
+    Function *pebReader = windowsPebReader(M);
+    Function *moduleByHash = windowsLdrModuleByHash(M);
+    Function *resolver = windowsPeExportResolver(M);
+    if (!pebReader || !moduleByHash || !resolver)
+        return nullptr;
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    auto *resolveBB = BasicBlock::Create(ctx, "resolve", fn);
+    auto *loopBB = BasicBlock::Create(ctx, "loop", fn);
+    auto *closePrevBB = BasicBlock::Create(ctx, "close.prev", fn);
+    auto *closePrevCallBB = BasicBlock::Create(ctx, "close.prev.call", fn);
+    auto *probeBB = BasicBlock::Create(ctx, "probe", fn);
+    auto *nextBB = BasicBlock::Create(ctx, "next", fn);
+    auto *retBB = BasicBlock::Create(ctx, "ret", fn);
+    auto *retCloseBB = BasicBlock::Create(ctx, "ret.close", fn);
+    auto *doneBB = BasicBlock::Create(ctx, "done", fn);
+
+    IRBuilder<> B(entry);
+    AllocaInst *retLen = B.CreateAlloca(i32, nullptr, "morok.win.thide.retlen");
+    AllocaInst *nextThread =
+        B.CreateAlloca(ip, nullptr, "morok.win.thide.next.slot");
+    AllocaInst *hidden =
+        B.CreateAlloca(i8, nullptr, "morok.win.thide.hidden.slot");
+    AllocaInst *threadsSeen =
+        B.CreateAlloca(i32, nullptr, "morok.win.thide.seen.slot");
+    AllocaInst *failures =
+        B.CreateAlloca(i32, nullptr, "morok.win.thide.fail.slot");
+    AllocaInst *closeSlot =
+        B.CreateAlloca(ip, nullptr, "morok.win.thide.close.slot");
+    B.CreateStore(ConstantInt::get(i32, 0), retLen)->setVolatile(true);
+    B.CreateStore(ConstantInt::get(ip, 0), nextThread)->setVolatile(true);
+    B.CreateStore(ConstantInt::get(i8, 0), hidden)->setVolatile(true);
+    B.CreateStore(ConstantInt::get(i32, 0), threadsSeen)->setVolatile(true);
+    B.CreateStore(ConstantInt::get(i32, 0), failures)->setVolatile(true);
+    B.CreateStore(ConstantInt::get(ip, 0), closeSlot)->setVolatile(true);
+
+    Value *peb = B.CreateCall(pebReader, {}, "morok.win.thide.peb");
+    foldState(B, State, peb, rng.next(), "morok.win.thide.peb.mix");
+    B.CreateCondBr(B.CreateICmpNE(peb, ConstantInt::get(ip, 0),
+                                  "morok.win.thide.peb.present"),
+                   resolveBB, retBB);
+
+    IRBuilder<> RB(resolveBB);
+    Value *ntdll = RB.CreateCall(
+        moduleByHash,
+        {peb, ConstantInt::get(i64, fnv1aLowerAsciiName("ntdll.dll"))},
+        "morok.win.thide.ntdll");
+    Function *peResolve = resolver;
+    Value *getNext = RB.CreateCall(
+        peResolve,
+        {ntdll, ConstantInt::get(i64, fnv1aName("NtGetNextThread"))},
+        "morok.win.thide.ntgetnextthread");
+    Value *setInfo = RB.CreateCall(
+        peResolve,
+        {ntdll, ConstantInt::get(i64, fnv1aName("NtSetInformationThread"))},
+        "morok.win.thide.ntsetinformationthread");
+    Value *queryInfo = RB.CreateCall(
+        peResolve,
+        {ntdll, ConstantInt::get(i64, fnv1aName("NtQueryInformationThread"))},
+        "morok.win.thide.ntqueryinformationthread");
+    Value *closeFn = RB.CreateCall(
+        peResolve, {ntdll, ConstantInt::get(i64, fnv1aName("NtClose"))},
+        "morok.win.thide.ntclose");
+    RB.CreateStore(closeFn, closeSlot)->setVolatile(true);
+    foldState(RB, State, ntdll, rng.next(), "morok.win.thide.ntdll.mix");
+    foldState(RB, State, getNext, rng.next(),
+              "morok.win.thide.ntgetnextthread.mix");
+    foldState(RB, State, setInfo, rng.next(),
+              "morok.win.thide.ntsetinformationthread.mix");
+    foldState(RB, State, queryInfo, rng.next(),
+              "morok.win.thide.ntqueryinformationthread.mix");
+    Value *ready = RB.CreateAnd(
+        RB.CreateICmpNE(getNext, ConstantInt::get(ip, 0)),
+        RB.CreateAnd(RB.CreateICmpNE(setInfo, ConstantInt::get(ip, 0)),
+                     RB.CreateICmpNE(queryInfo, ConstantInt::get(ip, 0)),
+                     "morok.win.thide.info.ready"),
+        "morok.win.thide.ready");
+    RB.CreateCondBr(ready, loopBB, retBB);
+
+    IRBuilder<> LB(loopBB);
+    auto *current = LB.CreatePHI(ip, 2, "morok.win.thide.current");
+    auto *idx = LB.CreatePHI(i32, 2, "morok.win.thide.idx");
+    current->addIncoming(ConstantInt::get(ip, 0), resolveBB);
+    idx->addIncoming(ConstantInt::get(i32, 0), resolveBB);
+    LB.CreateStore(ConstantInt::get(ip, 0), nextThread)->setVolatile(true);
+    auto *getNextTy =
+        FunctionType::get(i32, {ptr, ptr, i32, i32, i32, ptr}, false);
+    Value *getNextPtr =
+        LB.CreateIntToPtr(getNext, ptr, "morok.win.thide.getnext.ptr");
+    Value *currentProcess = LB.CreateIntToPtr(
+        ConstantInt::getSigned(ip, -1), ptr, "morok.win.thide.current.process");
+    Value *currentHandle =
+        LB.CreateIntToPtr(current, ptr, "morok.win.thide.current.handle");
+    Value *getStatus = LB.CreateCall(
+        getNextTy, getNextPtr,
+        {currentProcess, currentHandle, ConstantInt::get(i32, 0x60),
+         ConstantInt::get(i32, 0), ConstantInt::get(i32, 0), nextThread},
+        "morok.win.thide.getnext.status");
+    Value *nextHandle =
+        LB.CreateLoad(ip, nextThread, "morok.win.thide.next.handle");
+    cast<LoadInst>(nextHandle)->setVolatile(true);
+    foldState(LB, State, getStatus, rng.next(),
+              "morok.win.thide.getnext.status.mix");
+    Value *gotThread = LB.CreateAnd(
+        LB.CreateICmpSGE(getStatus, ConstantInt::get(i32, 0)),
+        LB.CreateAnd(LB.CreateICmpNE(nextHandle, ConstantInt::get(ip, 0)),
+                     LB.CreateICmpULT(idx, ConstantInt::get(i32, 64)),
+                     "morok.win.thide.next.valid"),
+        "morok.win.thide.got.thread");
+    LB.CreateCondBr(gotThread, closePrevBB, retBB);
+
+    IRBuilder<> CP(closePrevBB);
+    CP.CreateCondBr(CP.CreateICmpNE(current, ConstantInt::get(ip, 0),
+                                    "morok.win.thide.has.previous"),
+                    closePrevCallBB, probeBB);
+
+    IRBuilder<> CCB(closePrevCallBB);
+    auto *closeTy = FunctionType::get(i32, {ptr}, false);
+    Value *closePtr =
+        CCB.CreateIntToPtr(closeFn, ptr, "morok.win.thide.close.prev.ptr");
+    Value *closePrevStatus = CCB.CreateCall(
+        closeTy, closePtr,
+        {CCB.CreateIntToPtr(current, ptr, "morok.win.thide.close.prev.handle")},
+        "morok.win.thide.close.prev.status");
+    foldState(CCB, State, closePrevStatus, rng.next(),
+              "morok.win.thide.close.prev.status.mix");
+    CCB.CreateBr(probeBB);
+
+    IRBuilder<> PB(probeBB);
+    auto *setTy = FunctionType::get(i32, {ptr, i32, ptr, i32}, false);
+    auto *queryTy = FunctionType::get(i32, {ptr, i32, ptr, i32, ptr}, false);
+    Value *threadHandle =
+        PB.CreateIntToPtr(nextHandle, ptr, "morok.win.thide.thread.handle");
+    Value *setPtr =
+        PB.CreateIntToPtr(setInfo, ptr, "morok.win.thide.set.ptr");
+    Value *queryPtr =
+        PB.CreateIntToPtr(queryInfo, ptr, "morok.win.thide.query.ptr");
+    Value *seenOld =
+        PB.CreateLoad(i32, threadsSeen, "morok.win.thide.seen.old");
+    cast<LoadInst>(seenOld)->setVolatile(true);
+    PB.CreateStore(PB.CreateAdd(seenOld, ConstantInt::get(i32, 1),
+                                "morok.win.thide.seen.next"),
+                   threadsSeen)
+        ->setVolatile(true);
+    Value *setStatus = PB.CreateCall(
+        setTy, setPtr,
+        {threadHandle, ConstantInt::get(i32, 0x11),
+         ConstantPointerNull::get(ptr), ConstantInt::get(i32, 0)},
+        "morok.win.thide.set.status");
+    PB.CreateStore(ConstantInt::get(i8, 0), hidden)->setVolatile(true);
+    Value *queryStatus = PB.CreateCall(
+        queryTy, queryPtr,
+        {threadHandle, ConstantInt::get(i32, 0x11), hidden,
+         ConstantInt::get(i32, 1), retLen},
+        "morok.win.thide.query.status");
+    Value *hiddenValue = PB.CreateLoad(i8, hidden, "morok.win.thide.hidden");
+    cast<LoadInst>(hiddenValue)->setVolatile(true);
+    Value *setOk = PB.CreateICmpSGE(setStatus, ConstantInt::get(i32, 0),
+                                    "morok.win.thide.set.ok");
+    Value *queryOk = PB.CreateICmpSGE(queryStatus, ConstantInt::get(i32, 0),
+                                      "morok.win.thide.query.ok");
+    Value *hiddenOk = PB.CreateICmpNE(hiddenValue, ConstantInt::get(i8, 0),
+                                      "morok.win.thide.hidden.ok");
+    Value *stuck = PB.CreateAnd(PB.CreateAnd(setOk, queryOk,
+                                             "morok.win.thide.status.ok"),
+                                hiddenOk, "morok.win.thide.stuck");
+    Value *failed = PB.CreateNot(stuck, "morok.win.thide.failed");
+    Value *failOld =
+        PB.CreateLoad(i32, failures, "morok.win.thide.fail.old");
+    cast<LoadInst>(failOld)->setVolatile(true);
+    PB.CreateStore(PB.CreateAdd(failOld, PB.CreateZExt(failed, i32),
+                                "morok.win.thide.fail.next"),
+                   failures)
+        ->setVolatile(true);
+    foldState(PB, State, setStatus, rng.next(),
+              "morok.win.thide.set.status.mix");
+    foldState(PB, State, queryStatus, rng.next(),
+              "morok.win.thide.query.status.mix");
+    foldState(PB, State, hiddenValue, rng.next(),
+              "morok.win.thide.hidden.mix");
+    foldFlag(PB, State, failed, 0xB68F214CD03E975AULL,
+             "morok.win.thide.failed");
+    PB.CreateBr(nextBB);
+
+    IRBuilder<> NB(nextBB);
+    Value *nextIdx =
+        NB.CreateAdd(idx, ConstantInt::get(i32, 1),
+                     "morok.win.thide.next.idx");
+    NB.CreateBr(loopBB);
+    current->addIncoming(nextHandle, nextBB);
+    idx->addIncoming(nextIdx, nextBB);
+
+    IRBuilder<> RetB(retBB);
+    auto *lastHandle = RetB.CreatePHI(ip, 3, "morok.win.thide.last.handle");
+    lastHandle->addIncoming(ConstantInt::get(ip, 0), entry);
+    lastHandle->addIncoming(ConstantInt::get(ip, 0), resolveBB);
+    lastHandle->addIncoming(current, loopBB);
+    Value *closeFinal =
+        RetB.CreateLoad(ip, closeSlot, "morok.win.thide.close.final");
+    cast<LoadInst>(closeFinal)->setVolatile(true);
+    Value *shouldClose = RetB.CreateAnd(
+        RetB.CreateICmpNE(lastHandle, ConstantInt::get(ip, 0)),
+        RetB.CreateICmpNE(closeFinal, ConstantInt::get(ip, 0)),
+        "morok.win.thide.close.final.needed");
+    RetB.CreateCondBr(shouldClose, retCloseBB, doneBB);
+
+    IRBuilder<> RCB(retCloseBB);
+    Value *closeFinalPtr =
+        RCB.CreateIntToPtr(closeFinal, ptr, "morok.win.thide.close.final.ptr");
+    Value *closeFinalStatus = RCB.CreateCall(
+        closeTy, closeFinalPtr,
+        {RCB.CreateIntToPtr(lastHandle, ptr,
+                            "morok.win.thide.close.final.handle")},
+        "morok.win.thide.close.final.status");
+    foldState(RCB, State, closeFinalStatus, rng.next(),
+              "morok.win.thide.close.final.status.mix");
+    RCB.CreateBr(doneBB);
+
+    IRBuilder<> DB(doneBB);
+    Value *seenFinal =
+        DB.CreateLoad(i32, threadsSeen, "morok.win.thide.seen.final");
+    cast<LoadInst>(seenFinal)->setVolatile(true);
+    Value *failFinal =
+        DB.CreateLoad(i32, failures, "morok.win.thide.fail.final");
+    cast<LoadInst>(failFinal)->setVolatile(true);
+    foldState(DB, State, seenFinal, rng.next(),
+              "morok.win.thide.seen.final.mix");
+    foldState(DB, State, failFinal, rng.next(),
+              "morok.win.thide.fail.final.mix");
+    foldFlag(DB, State,
+             DB.CreateICmpNE(failFinal, ConstantInt::get(i32, 0),
+                             "morok.win.thide.fail.any"),
+             0x2AC96D507B1E48F3ULL, "morok.win.thide.fail.any");
+    DB.CreateRetVoid();
+    return fn;
+}
+
 } // namespace
 
 bool antiDebuggingModule(Module &M, ir::IRRandom &rng, bool AllowSelfTrace) {
@@ -9365,6 +9622,21 @@ bool windowsDebugObjectModule(Module &M, ir::IRRandom &rng) {
     return true;
 }
 
+bool windowsThreadHideModule(Module &M, ir::IRRandom &rng) {
+    const Triple tt(M.getTargetTriple());
+    GlobalVariable *state = windowsPeState(M, rng);
+    Function *probe = windowsThreadHideProbe(M, state, rng, tt);
+    if (!probe)
+        return false;
+
+    Function *ctor = makeCtorShell(M, "morok.win.thide");
+    IRBuilder<> B(&ctor->getEntryBlock());
+    B.CreateCall(probe);
+    B.CreateRetVoid();
+    appendToGlobalCtors(M, ctor, 0);
+    return true;
+}
+
 PreservedAnalyses AntiDebuggingPass::run(Module &M, ModuleAnalysisManager &) {
     ir::IRRandom rng(engine_);
     return antiDebuggingModule(M, rng) ? PreservedAnalyses::none()
@@ -9399,6 +9671,13 @@ PreservedAnalyses WindowsDebugObjectPass::run(Module &M,
     ir::IRRandom rng(engine_);
     return windowsDebugObjectModule(M, rng) ? PreservedAnalyses::none()
                                             : PreservedAnalyses::all();
+}
+
+PreservedAnalyses WindowsThreadHidePass::run(Module &M,
+                                             ModuleAnalysisManager &) {
+    ir::IRRandom rng(engine_);
+    return windowsThreadHideModule(M, rng) ? PreservedAnalyses::none()
+                                           : PreservedAnalyses::all();
 }
 
 PreservedAnalyses TimingOraclePass::run(Module &M, ModuleAnalysisManager &) {

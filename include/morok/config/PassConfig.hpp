@@ -370,6 +370,7 @@ struct PassConfig {
     ToggleConfig windows_pe_foundation;
     ToggleConfig windows_peb_heap_debug;
     ToggleConfig windows_debug_object;
+    ToggleConfig windows_thread_hide;
     ToggleConfig timing_oracles;
     ToggleConfig trap_oracles;
     ToggleConfig page_fault_oracles;

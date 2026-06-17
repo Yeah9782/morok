@@ -92,7 +92,7 @@ Tags: `[platform · extends <pass> | new]`. All `XL` Windows items presume the
 - [x] **Windows/PE foundation:** add Windows as a target platform with a runtime helper layer (PEB/TEB access, indirect syscalls, SEH/VEH) — prerequisite for all Windows items below `[windows · new]`
 - [x] Windows PEB/heap debug-struct battery: `BeingDebugged`, `NtGlobalFlag`, `ProcessHeap` `Flags`/`ForceFlags`, via direct gs-relative reads (bypass API hooks) `[windows · new]`
 - [x] Windows debug-object battery: `NtQueryInformationProcess` (`ProcessDebugPort`/`DebugObjectHandle`/`DebugFlags`) + `NtQueryObject` `ObjectTypesInformation` count `[windows · new]`
-- [ ] Windows `NtSetInformationThread(ThreadHideFromDebugger)` on all threads, then query it back to confirm it stuck `[windows · new]`
+- [x] Windows `NtSetInformationThread(ThreadHideFromDebugger)` on all threads, then query it back to confirm it stuck `[windows · new]`
 - [ ] Windows anti-attach: patch `DbgUiRemoteBreakin`→`ExitProcess` and `DbgBreakPoint`→`ret`, plus the `CloseHandle`/`NtClose` invalid-handle probe `[windows · new]`
 - [ ] Windows kernel-debugger probes: `SharedUserData.KdDebuggerEnabled`, `NtQuerySystemInformation(SystemKernelDebuggerInformation)`, + driver/parent-PID/window-class census (decoy-grade) `[windows · new]`
 - [ ] Windows direct + indirect syscalls (Hell's/Halo's/Tartarus' Gate, SysWhispers) to defeat all usermode ntdll hooks `[windows · new]`
