@@ -63,6 +63,18 @@ bool safeCallArgs(const CallBase &CB) {
     return true;
 }
 
+// A "wide magic" is an integer constant that needs more than a single 16-bit
+// move to materialize — i.e. a hash/sentinel a license gate compares against,
+// not a small loop bound or array index.  The conditions-only sweep targets
+// only these: they are the patchable cleartext `cmp reg, #imm` an attacker
+// reads, and restricting to them keeps the early sweep from encrypting hundreds
+// of tiny loop comparisons (which would inflate the host past the budget the
+// integrity passes need).
+bool isWideMagic(Constant *C) {
+    auto *CI = dyn_cast<ConstantInt>(C);
+    return CI && CI->getValue().getActiveBits() > 16;
+}
+
 bool eligibleConstant(Constant *C) {
     if (auto *CI = dyn_cast<ConstantInt>(C))
         return eligibleWidth(CI->getType()->getIntegerBitWidth());
@@ -171,6 +183,7 @@ bool constantEncryptFunction(Function &F, const ConstEncParams &params,
     const std::uint32_t iterations = std::clamp<std::uint32_t>(
         params.iterations ? params.iterations : 1, 1, kMaxConstEncIterations);
     bool changed = false;
+    const std::size_t maxTargets = kMaxConstEncTargetsPerIteration;
 
     for (std::uint32_t it = 0; it < iterations; ++it) {
         // Collect (instruction, operand index, constant) first; mutating
@@ -185,8 +198,20 @@ bool constantEncryptFunction(Function &F, const ConstEncParams &params,
         std::vector<Target> targets;
         for (BasicBlock &bb : F) {
             for (Instruction &inst : bb) {
-                if (targets.size() >= kMaxConstEncTargetsPerIteration)
+                if (targets.size() >= maxTargets)
                     break;
+                // Decision-gate scope: only the constant operands of comparisons
+                // and constant branch/switch conditions.  These are what an
+                // attacker reads as a cleartext `cmp reg, #imm` and NOPs.
+                if (params.conditions_only) {
+                    if (auto *Cmp = dyn_cast<CmpInst>(&inst)) {
+                        for (unsigned i = 0; i < Cmp->getNumOperands(); ++i)
+                            if (auto *c = dyn_cast<Constant>(Cmp->getOperand(i)))
+                                if (eligibleConstant(c) && isWideMagic(c))
+                                    targets.push_back({&inst, i, c});
+                    }
+                    continue;
+                }
                 if (auto *PN = dyn_cast<PHINode>(&inst)) {
                     for (unsigned I = 0; I < PN->getNumIncomingValues(); ++I) {
                         if (!eligiblePhiIncoming(*PN, I))
@@ -221,7 +246,7 @@ bool constantEncryptFunction(Function &F, const ConstEncParams &params,
                                 targets.push_back({&inst, i, c});
                 }
             }
-            if (targets.size() >= kMaxConstEncTargetsPerIteration)
+            if (targets.size() >= maxTargets)
                 break;
         }
 

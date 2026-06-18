@@ -42,7 +42,7 @@ namespace morok::passes {
 
 namespace {
 
-constexpr std::uint32_t kMaxSitesPerFunction = 2;
+constexpr std::uint32_t kMaxSitesPerFunction = 4;
 
 struct NanomiteLayout {
     std::uint64_t sigactionSize = 0;
@@ -359,6 +359,21 @@ bool forwardBranch(BranchInst &BI,
     const unsigned head = Order.lookup(BI.getParent());
     return Order.lookup(BI.getSuccessor(0)) > head &&
            Order.lookup(BI.getSuccessor(1)) > head;
+}
+
+// A "decision" branch is a conditional branch one of whose arms directly returns
+// or terminates — exactly the shape of a license gate (`if (cond) return/exit`).
+// These are the branches an attacker NOPs to bypass a check, so the nanomite
+// budget should claim them FIRST rather than spending it on incidental branches.
+bool armTerminates(BasicBlock *BB) {
+    if (!BB)
+        return false;
+    Instruction *Term = BB->getTerminator();
+    return isa<ReturnInst>(Term) || isa<UnreachableInst>(Term);
+}
+
+bool isDecisionBranch(BranchInst &BI) {
+    return armTerminates(BI.getSuccessor(0)) || armTerminates(BI.getSuccessor(1));
 }
 
 void shuffleBranches(std::vector<BranchInst *> &Branches, ir::IRRandom &Rng) {
@@ -750,15 +765,30 @@ bool nanomitesModule(Module &M, const NanomiteParams &Params,
         for (BasicBlock &BB : F) {
             if (loopBlocks.contains(&BB))
                 continue;
-            if (auto *BI = dyn_cast<BranchInst>(BB.getTerminator()))
-                if (forwardBranch(*BI, order))
+            if (auto *BI = dyn_cast<BranchInst>(BB.getTerminator())) {
+                if (!eligibleBranchShape(*BI))
+                    continue;
+                // Admit forward branches (as before) AND decision branches whose
+                // arm returns/terminates.  The forward-only rule otherwise drops
+                // the gate `if (cond) return` shapes — the exact branches an
+                // attacker patches — because a return arm is rarely ordered after
+                // the head.  A terminating arm cannot be a loop edge, so it is
+                // safe to nanomite regardless of block order.
+                if (forwardBranch(*BI, order) || isDecisionBranch(*BI))
                     candidates.push_back(BI);
+            }
         }
     }
     if (candidates.empty())
         return false;
 
     shuffleBranches(candidates, Rng);
+    // Spend the (scarce) nanomite budget on real decision branches first — the
+    // gate `if (verdict.ok)` / `if (hash != MAGIC) return` shapes an attacker
+    // patches — while keeping the randomized order within each tier so the choice
+    // still varies per build.  stable_partition preserves the post-shuffle order.
+    std::stable_partition(candidates.begin(), candidates.end(),
+                          [](BranchInst *BI) { return isDecisionBranch(*BI); });
     GlobalVariable *decision = decisionGlobal(M);
     GlobalVariable *token = tokenGlobal(M);
     GlobalVariable *target = targetGlobal(M);

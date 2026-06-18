@@ -22,6 +22,16 @@ CONFIG=""
 SEED="${SEED:-832040}"
 OPT_LEVEL="${OPT_LEVEL:--O3}"
 
+# Post-link self-check sealing.  The self_checksum/DFI passes emit a runtime
+# native-code hash gated on a patchable window length that is only filled in
+# after the final layout is known.  Without this step the window length stays at
+# its unsealed sentinel, the code-byte hash is skipped, and a patched branch is
+# never detected.  Sealing is mandatory for a shippable binary.
+SEAL_BINARIES="${SEAL_BINARIES:-1}"
+SEAL_WINDOW="${SEAL_WINDOW:-262144}"
+SEAL_TOOL="${SEAL_TOOL:-$ROOT/tests/e2e/adversarial_binary.py}"
+PYTHON="${PYTHON:-python3}"
+
 BUILD_LINUX=1
 BUILD_MACOS=1
 STRIP_BINARIES=1
@@ -180,6 +190,34 @@ strip_macos() {
   xcrun strip -ur "$out"
 }
 
+# Post-link seal MUST run last (after strip), so the sealed code-window hash is
+# taken over the exact bytes that exist at runtime.  On macOS the in-place byte
+# rewrite invalidates the signature, so re-sign afterwards.  Fail closed: a
+# binary with zero sealed manifests has no native-code patch protection and must
+# not be shipped.
+seal_binary() {
+  local out="$1"
+  [ "$SEAL_BINARIES" -eq 1 ] || return 0
+  [ -f "$SEAL_TOOL" ] || die "sealer not found: $SEAL_TOOL"
+  need_tool "$PYTHON"
+  echo ">> sealing self-check manifests in $out"
+  local log
+  if ! log="$("$PYTHON" "$SEAL_TOOL" seal "$out" --window "$SEAL_WINDOW" 2>&1)"; then
+    printf '%s\n' "$log" >&2
+    die "post-link seal failed for $out"
+  fi
+  printf '   %s\n' "$log"
+  case "$log" in
+    *manifests=0*)
+      die "refusing to ship UNSEALED binary (0 self-check manifests): $out"
+      ;;
+  esac
+  if [ "$(uname -s)" = "Darwin" ] && file "$out" 2>/dev/null | grep -q "Mach-O"; then
+    /usr/bin/codesign --force --sign - "$out" >/dev/null 2>&1 ||
+      die "codesign failed after seal: $out"
+  fi
+}
+
 build_linux() {
   local cc="${LINUX_CC:-${LINUX_TARGET}-gcc}"
   need_tool "$cc"
@@ -228,6 +266,7 @@ build_linux() {
     "-B$tool_bin" "-B$gcc_lib_dir" "-B$crt_dir" "-L$gcc_lib_dir" \
     -D_GNU_SOURCE "${static_flag[@]}" "${morok_cfg[@]}" "${COMMON[@]}" -o "$out"
   strip_linux "$out"
+  seal_binary "$out"
   OUTPUTS+=("$out")
 }
 
@@ -275,6 +314,7 @@ build_macos() {
       -mmacosx-version-min="$MACOS_MIN" "${MOROK_CONFIG[@]}" "${COMMON[@]}" \
       -o "$out"
     strip_macos "$out"
+    seal_binary "$out"
     OUTPUTS+=("$out")
   done
 }

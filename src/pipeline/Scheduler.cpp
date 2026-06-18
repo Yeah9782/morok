@@ -870,6 +870,26 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
                 changed |= passes::constantEncryptFunction(F, p, rng);
             }
 
+            // Decision-gate rescue: the generic constenc above runs on the tight
+            // growth budget and skips heavily-inlined gate functions (a license
+            // check folds h0/h1/k2 into one large body well past 2500 insts),
+            // leaving the gate `cmp reg, #0xMAGIC` in the clear for an attacker
+            // to read and NOP.  Re-run constenc here on the higher integrity
+            // budget, scoped to wide comparison magics only, so the gate
+            // immediate is encrypted even in those large functions.  Placed after
+            // the integrity passes so it never inflates them out of their own
+            // budget.
+            if (integrityFunctionOk(F) &&
+                ir::shouldObfuscate(F, "constenc",
+                                    eff.const_enc.enabled.value_or(false))) {
+                passes::ConstEncParams p;
+                p.probability = 100;
+                p.share_count = eff.const_enc.share_count.value_or(2);
+                p.iterations = 1;
+                p.conditions_only = true;
+                changed |= passes::constantEncryptFunction(F, p, rng);
+            }
+
             // Indirect branching last per function (it consumes the conditional
             // branches the other passes leave behind).
             if (heavyFunctionOk(F) &&

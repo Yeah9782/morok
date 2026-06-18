@@ -92,6 +92,67 @@ Value *emitFinalizer(IRBuilderBase &B, unsigned variant, Value *T) {
     }
 }
 
+// Pass-time application of a randomized recipe (mirror of emitRecipeFinalizer).
+std::uint64_t applyRecipe(const KeystreamRecipe &R, std::uint64_t T) {
+    for (unsigned I = 0; I < R.count; ++I) {
+        const KeystreamOp &Op = R.ops[I];
+        switch (Op.kind) {
+        case KeystreamOp::XorShr:
+            T ^= T >> Op.shift;
+            break;
+        case KeystreamOp::XorShl:
+            T ^= T << Op.shift;
+            break;
+        case KeystreamOp::MulOdd:
+            T *= Op.c;
+            break;
+        case KeystreamOp::Add:
+            T += Op.c;
+            break;
+        case KeystreamOp::Xor:
+            T ^= Op.c;
+            break;
+        case KeystreamOp::RotL:
+            T = (T << Op.shift) | (T >> (64u - Op.shift));
+            break;
+        }
+    }
+    return T;
+}
+
+// Emit the IR for a randomized recipe — byte-for-byte identical to applyRecipe.
+Value *emitRecipeFinalizer(IRBuilderBase &B, const KeystreamRecipe &R,
+                           Value *T) {
+    auto *I64 = B.getInt64Ty();
+    for (unsigned I = 0; I < R.count; ++I) {
+        const KeystreamOp &Op = R.ops[I];
+        switch (Op.kind) {
+        case KeystreamOp::XorShr:
+            T = B.CreateXor(T, B.CreateLShr(T, ConstantInt::get(I64, Op.shift)));
+            break;
+        case KeystreamOp::XorShl:
+            T = B.CreateXor(T, B.CreateShl(T, ConstantInt::get(I64, Op.shift)));
+            break;
+        case KeystreamOp::MulOdd:
+            T = B.CreateMul(T, ConstantInt::get(I64, Op.c));
+            break;
+        case KeystreamOp::Add:
+            T = B.CreateAdd(T, ConstantInt::get(I64, Op.c));
+            break;
+        case KeystreamOp::Xor:
+            T = B.CreateXor(T, ConstantInt::get(I64, Op.c));
+            break;
+        case KeystreamOp::RotL: {
+            Value *L = B.CreateShl(T, ConstantInt::get(I64, Op.shift));
+            Value *Rt = B.CreateLShr(T, ConstantInt::get(I64, 64u - Op.shift));
+            T = B.CreateOr(L, Rt);
+            break;
+        }
+        }
+    }
+    return T;
+}
+
 Value *emitOpaqueMix(IRBuilderBase &B, Value *V, Value *Salt,
                      const Twine &name) {
     auto *I64 = B.getInt64Ty();
@@ -178,6 +239,84 @@ Value *emitKeystreamDynamic(IRBuilderBase &B, unsigned variant, Value *K0,
     Value *Jp1 = B.CreateAdd(JVal, ConstantInt::get(I64, 1));
     Value *T = B.CreateAdd(K0, B.CreateMul(Jp1, ConstantInt::get(I64, mul)));
     return emitFinalizer(B, variant, T);
+}
+
+KeystreamRecipe randomKeystreamRecipe(IRRandom &rng) {
+    KeystreamRecipe R;
+    // 6..10 base ops, leaving headroom for the two guaranteed-diffusion ops.
+    const unsigned N = 6 + rng.range(5);
+    bool HasMul = false;
+    bool HasShift = false;
+    for (unsigned I = 0; I < N; ++I) {
+        KeystreamOp Op;
+        switch (rng.range(6)) {
+        case 0:
+            Op.kind = KeystreamOp::XorShr;
+            Op.shift = static_cast<std::uint8_t>(1 + rng.range(63));
+            HasShift = true;
+            break;
+        case 1:
+            Op.kind = KeystreamOp::XorShl;
+            Op.shift = static_cast<std::uint8_t>(1 + rng.range(63));
+            HasShift = true;
+            break;
+        case 2:
+            Op.kind = KeystreamOp::MulOdd;
+            Op.c = rng.next() | 1ull;
+            HasMul = true;
+            break;
+        case 3:
+            Op.kind = KeystreamOp::Add;
+            Op.c = rng.next();
+            break;
+        case 4:
+            Op.kind = KeystreamOp::Xor;
+            Op.c = rng.next();
+            break;
+        default:
+            Op.kind = KeystreamOp::RotL;
+            Op.shift = static_cast<std::uint8_t>(1 + rng.range(63));
+            break;
+        }
+        R.ops[R.count++] = Op;
+    }
+    // A keystream that is purely additive/linear folds back trivially; force at
+    // least one multiply and one xor-shift so every recipe is non-affine.
+    if (!HasMul && R.count < KeystreamRecipe::kMaxOps) {
+        KeystreamOp Op;
+        Op.kind = KeystreamOp::MulOdd;
+        Op.c = rng.next() | 1ull;
+        R.ops[R.count++] = Op;
+    }
+    if (!HasShift && R.count < KeystreamRecipe::kMaxOps) {
+        KeystreamOp Op;
+        Op.kind = KeystreamOp::XorShr;
+        Op.shift = static_cast<std::uint8_t>(1 + rng.range(63));
+        R.ops[R.count++] = Op;
+    }
+    return R;
+}
+
+std::uint64_t keystreamValue(const KeystreamRecipe &recipe, std::uint64_t k0,
+                             std::uint32_t j, std::uint64_t mul) {
+    const std::uint64_t T = k0 + static_cast<std::uint64_t>(j + 1) * mul;
+    return applyRecipe(recipe, T);
+}
+
+Value *emitKeystream(IRBuilderBase &B, const KeystreamRecipe &recipe, Value *K0,
+                     std::uint32_t j, std::uint64_t mul) {
+    auto *I64 = B.getInt64Ty();
+    Value *T = B.CreateAdd(
+        K0, ConstantInt::get(I64, static_cast<std::uint64_t>(j + 1) * mul));
+    return emitRecipeFinalizer(B, recipe, T);
+}
+
+Value *emitKeystreamDynamic(IRBuilderBase &B, const KeystreamRecipe &recipe,
+                            Value *K0, Value *JVal, std::uint64_t mul) {
+    auto *I64 = B.getInt64Ty();
+    Value *Jp1 = B.CreateAdd(JVal, ConstantInt::get(I64, 1));
+    Value *T = B.CreateAdd(K0, B.CreateMul(Jp1, ConstantInt::get(I64, mul)));
+    return emitRecipeFinalizer(B, recipe, T);
 }
 
 Value *emitRuntimeOpaqueZero(IRBuilderBase &B, Module &M, std::uint64_t salt,

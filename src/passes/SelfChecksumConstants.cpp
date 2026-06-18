@@ -13,6 +13,8 @@
 
 #include "morok/passes/SelfChecksumConstants.hpp"
 
+#include "morok/ir/InstUtil.hpp"
+
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Attributes.h"
@@ -48,6 +50,16 @@ using Builder = IRBuilder<NoFolder>;
 // Fixed post-link manifest sentinel. Keep this non-printable: readable product
 // markers in emitted binaries become cheap static-analysis anchors.
 constexpr std::uint64_t kPostlinkMagic = 0xA7D13C5E9000C3B2ULL;
+
+// Unsealed sentinel for the post-link code-window length.  A *non-zero*
+// initializer is mandatory here: a zero-initialized mutable global lands in
+// BSS/NOBITS, which has no file offset for the post-link sealer to patch, so
+// the window length can never be written and native code never enters the diff
+// (issues/6.md).  A non-zero initializer forces the global into a file-backed
+// data section.  The sealer overwrites this with the real native code length;
+// until then the runtime treats the sentinel as "unsealed" and skips the
+// code-byte hash so unsealed dev/test builds still behave correctly.
+constexpr std::uint32_t kUnsealedCodeSize = 0xFFFFFFFFu;
 
 struct Target {
     Instruction *user = nullptr;
@@ -365,7 +377,7 @@ GlobalVariable *createCodeSize(Module &M, StringRef Suffix) {
     auto *I32 = Type::getInt32Ty(M.getContext());
     auto *CodeSize = new GlobalVariable(
         M, I32, /*isConstant=*/false, GlobalValue::PrivateLinkage,
-        ConstantInt::get(I32, 0),
+        ConstantInt::get(I32, kUnsealedCodeSize),
         (Twine("morok.sc.code.size.") + Suffix).str());
     CodeSize->setAlignment(Align(4));
     return CodeSize;
@@ -463,9 +475,16 @@ Function *createDiffFunction(Module &M, StringRef Suffix,
         CB.CreateLoad(I32, CodeSize, "morok.sc.code.size.load");
     CodeSizeLoad->setVolatile(true);
     CodeSizeLoad->setAlignment(Align(4));
-    Value *HasCode =
-        CB.CreateICmpNE(CodeSizeLoad, ConstantInt::get(I32, 0),
-                        "morok.sc.code.has");
+    // The code-byte hash runs only once the post-link sealer has replaced the
+    // unsealed sentinel with a concrete native window length.  Treat both 0 and
+    // the sentinel as "unsealed" so the data-only diff stays identity (== 0) and
+    // unsealed builds behave correctly; sealed builds fold real code bytes in.
+    Value *NonZero = CB.CreateICmpNE(CodeSizeLoad, ConstantInt::get(I32, 0),
+                                     "morok.sc.code.nz");
+    Value *Sealed =
+        CB.CreateICmpNE(CodeSizeLoad, ConstantInt::get(I32, kUnsealedCodeSize),
+                        "morok.sc.code.sealed");
+    Value *HasCode = CB.CreateAnd(NonZero, Sealed, "morok.sc.code.has");
     CB.CreateCondBr(HasCode, CodeLoop, Exit);
 
     Builder KB(CodeLoop);
@@ -573,6 +592,70 @@ Value *emitFusedConstant(Function &F, Runtime &R, Instruction &User,
     return B.CreateBitCast(Raw, Encoded->result_ty, "morok.sc.const.fp");
 }
 
+// Fold the sealed, code-dependent diff into non-constant return values too —
+// including the first integer field of an aggregate (struct) return.  Constant
+// returns are already covered by collectTargets; this closes the gap for
+// computed and struct-typed verdicts a function hands back by value (e.g. a
+// license result), so a code patch corrupts the *returned* value, not only the
+// constants the function uses internally.  On an intact + sealed binary the
+// diff is zero and the return is byte-for-byte unchanged.
+void poisonReturns(Function &F, Runtime &R, const SelfChecksumParams &Params,
+                   ir::IRRandom &Rng) {
+    SmallVector<ReturnInst *, 8> Returns;
+    for (BasicBlock &BB : F) {
+        auto *RI = dyn_cast<ReturnInst>(BB.getTerminator());
+        if (!RI || RI->getNumOperands() != 1 || ir::isMustTailReturn(*RI))
+            continue;
+        if (isa<Constant>(RI->getOperand(0)))
+            continue; // already handled as a constant target
+        Returns.push_back(RI);
+    }
+
+    for (ReturnInst *RI : Returns) {
+        if (!Rng.chance(Params.probability))
+            continue;
+        Value *RetVal = RI->getOperand(0);
+        Type *Ty = RetVal->getType();
+
+        // Resolve which integer slot to poison BEFORE emitting the diff call so
+        // an unusable return type never leaves a dead checker behind.
+        IntegerType *IT = dyn_cast<IntegerType>(Ty);
+        int StructIdx = -1;
+        if (!IT) {
+            if (auto *ST = dyn_cast<StructType>(Ty)) {
+                for (unsigned Idx = 0; Idx < ST->getNumElements(); ++Idx) {
+                    auto *FT = dyn_cast<IntegerType>(ST->getElementType(Idx));
+                    if (FT && FT->getBitWidth() <= 64) {
+                        IT = FT;
+                        StructIdx = static_cast<int>(Idx);
+                        break;
+                    }
+                }
+            }
+        }
+        if (!IT || IT->getBitWidth() > 64)
+            continue;
+
+        Builder B(RI);
+        auto *Diff64 = B.CreateCall(R.diff->getFunctionType(), R.diff, {},
+                                    "morok.sc.ret.diff");
+        Value *D = IT->getBitWidth() < 64
+                       ? B.CreateTrunc(Diff64, IT, "morok.sc.ret.trunc")
+                       : static_cast<Value *>(Diff64);
+        if (StructIdx < 0) {
+            RI->setOperand(0, B.CreateXor(RetVal, D, "morok.sc.ret.val"));
+        } else {
+            Value *Field = B.CreateExtractValue(
+                RetVal, {static_cast<unsigned>(StructIdx)}, "morok.sc.ret.field");
+            Value *Mixed = B.CreateXor(Field, D, "morok.sc.ret.val");
+            RI->setOperand(0, B.CreateInsertValue(
+                                  RetVal, Mixed,
+                                  {static_cast<unsigned>(StructIdx)},
+                                  "morok.sc.ret.struct"));
+        }
+    }
+}
+
 } // namespace
 
 bool selfChecksumConstantsFunction(Function &F,
@@ -650,6 +733,8 @@ bool selfChecksumConstantsFunction(Function &F,
             T.user->setOperand(T.index, Repl);
         }
     }
+
+    poisonReturns(F, R, Params, Rng);
 
     relaxMemoryAttrs(F);
     invalidateCallerEffects(F);

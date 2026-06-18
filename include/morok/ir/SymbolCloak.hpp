@@ -33,6 +33,50 @@ class IRRandom;
 /// can produce (selected by `variant`).
 constexpr unsigned kKeystreamVariants = 3;
 
+/// A per-string randomized keystream finalizer.  Instead of one of a handful of
+/// fixed generators with hardcoded magic constants — a static-analysis signature
+/// a recovery script can hardcode and pattern-match — each string draws its OWN
+/// sequence of reversible 64-bit mixing ops with its OWN random constants.  The
+/// pass-time evaluator (`keystreamValue`) and the emitted IR (`emitKeystream`)
+/// walk the identical recipe, so ciphertext built with one is recovered
+/// byte-for-byte by the other.  No two strings share opcode order or constants.
+struct KeystreamOp {
+    enum Kind : std::uint8_t {
+        XorShr, // t ^= t >> shift
+        XorShl, // t ^= t << shift
+        MulOdd, // t *= c   (c forced odd, hence invertible)
+        Add,    // t += c
+        Xor,    // t ^= c
+        RotL,   // t = rotl64(t, shift)
+    };
+    Kind kind = XorShr;
+    std::uint8_t shift = 1;  // 1..63 for shift/rotate ops
+    std::uint64_t c = 1;     // constant for MulOdd/Add/Xor
+};
+
+struct KeystreamRecipe {
+    static constexpr unsigned kMaxOps = 12;
+    KeystreamOp ops[kMaxOps];
+    unsigned count = 0;
+};
+
+/// Build a random, well-mixed keystream recipe (random op order + constants).
+KeystreamRecipe randomKeystreamRecipe(IRRandom &rng);
+
+/// Pass-time keystream value for position `j` under a randomized recipe.
+std::uint64_t keystreamValue(const KeystreamRecipe &recipe, std::uint64_t k0,
+                             std::uint32_t j, std::uint64_t mul);
+
+/// Emit the i64 keystream value for position `j` under a randomized recipe —
+/// the exact IR mirror of the recipe `keystreamValue` overload.
+llvm::Value *emitKeystream(llvm::IRBuilderBase &B, const KeystreamRecipe &recipe,
+                           llvm::Value *K0, std::uint32_t j, std::uint64_t mul);
+
+/// Recipe-driven counterpart of the runtime-index keystream emitter.
+llvm::Value *emitKeystreamDynamic(llvm::IRBuilderBase &B,
+                                  const KeystreamRecipe &recipe, llvm::Value *K0,
+                                  llvm::Value *JVal, std::uint64_t mul);
+
 /// Pass-time keystream value for position `j`, given the runtime key `k0`, the
 /// odd multiplier `mul`, and the generator `variant` (< kKeystreamVariants).
 /// Pure 64-bit wraparound arithmetic with an exact IR analogue (emitKeystream),

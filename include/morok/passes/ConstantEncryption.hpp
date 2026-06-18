@@ -32,6 +32,12 @@ struct ConstEncParams {
     std::uint32_t probability = 100; ///< per-constant chance, 0..100
     std::uint32_t share_count = 2;   ///< XOR shares, clamped to [2,8]
     std::uint32_t iterations = 1;    ///< sweeps over the function (>=1)
+    /// Restrict to decision-gate constants only: the operands of comparisons and
+    /// of constant branch/switch conditions.  Used for an early sweep that hides
+    /// a license gate's `cmp reg, #imm` BEFORE the structural passes inflate the
+    /// host function past the value-pass budget, so the immediate never survives
+    /// as a patchable cleartext compare.
+    bool conditions_only = false;
 };
 
 /// Encrypt eligible scalar constants in `F`.  Returns true if any changed.

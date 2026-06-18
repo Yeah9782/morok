@@ -69,12 +69,15 @@ bool eligible(const GlobalVariable &gv) {
            cda->getNumElements() > 0;
 }
 
-// The per-string cipher recipe; chosen independently for every string.
+// The per-string cipher recipe; chosen independently for every string.  The
+// keystream finalizer is a randomized op sequence with random constants (no two
+// strings share a shape), so a recovery script cannot hardcode a decoder
+// template and pattern-match every string from a single signature.
 struct Cipher {
-    unsigned variant = 0;  // keystream generator
-    bool add = false;      // ADD vs XOR combine
-    std::uint64_t key = 0; // per-string xor into the module seed
-    std::uint64_t mul = 1; // per-string odd multiplier
+    ir::KeystreamRecipe recipe; // randomized keystream generator
+    bool add = false;           // ADD vs XOR combine
+    std::uint64_t key = 0;      // per-string xor into the module seed
+    std::uint64_t mul = 1;      // per-string odd multiplier
 };
 
 void emitStaticAnalysisBarrier(IRBuilderBase &B, const Module &M) {
@@ -215,7 +218,7 @@ void emitDecryptUnrolled(IRBuilder<> &B, const Cipher &c, GlobalVariable *seed,
         emitVolatileStableZero(B, c.key + c.mul, "morok.str.byte.mix"), i8,
         "morok.str.byte.zero");
     for (std::uint64_t i = 0; i < n; ++i) {
-        Value *ks = ir::emitKeystream(B, c.variant, rtKey,
+        Value *ks = ir::emitKeystream(B, c.recipe, rtKey,
                                       static_cast<std::uint32_t>(i), c.mul);
         Value *ksByte = B.CreateTrunc(ks, i8);
         Value *sp = B.CreateInBoundsGEP(
@@ -278,7 +281,7 @@ Function *createStackDecryptHelper(Module &M, const Cipher &C,
     IRBuilder<> LB(Loop);
     PHINode *I = LB.CreatePHI(I64, 2, "morok.str.stack.i");
     I->addIncoming(ConstantInt::get(I64, 0), Entry);
-    Value *Ks = ir::emitKeystreamDynamic(LB, C.variant, RtKey, I, C.mul);
+    Value *Ks = ir::emitKeystreamDynamic(LB, C.recipe, RtKey, I, C.mul);
     Value *KsByte = LB.CreateTrunc(Ks, I8);
     Value *Src =
         LB.CreateInBoundsGEP(ArrTy, CipherText, {ConstantInt::get(I64, 0), I},
@@ -380,7 +383,7 @@ bool stringEncryptModule(Module &M, const StrEncParams &params,
         const bool stackCandidate = gv->isConstant() && cda->isCString();
 
         Cipher c;
-        c.variant = rng.range(ir::kKeystreamVariants);
+        c.recipe = ir::randomKeystreamRecipe(rng);
         c.add = rng.range(2) == 0;
         c.key = rng.next();
         c.mul = rng.next() | 1ull;
@@ -412,7 +415,7 @@ bool stringEncryptModule(Module &M, const StrEncParams &params,
         std::vector<std::uint8_t> ct(storedLen);
         for (std::uint64_t i = 0; i < storedLen; ++i) {
             const auto ks = static_cast<std::uint8_t>(
-                ir::keystreamValue(c.variant, k0, static_cast<std::uint32_t>(i),
+                ir::keystreamValue(c.recipe, k0, static_cast<std::uint32_t>(i),
                                    c.mul) &
                 0xFFu);
             ct[i] = c.add ? static_cast<std::uint8_t>(plain[i] + ks)
@@ -486,7 +489,7 @@ bool stringEncryptModule(Module &M, const StrEncParams &params,
             PHINode *iv = B.CreatePHI(i64, 2);
             iv->addIncoming(ConstantInt::get(i64, 0), entry);
             Value *ks =
-                ir::emitKeystreamDynamic(B, c.variant, rtKey, iv, c.mul);
+                ir::emitKeystreamDynamic(B, c.recipe, rtKey, iv, c.mul);
             Value *ptr = B.CreateInBoundsGEP(arrTy, target,
                                              {ConstantInt::get(i64, 0), iv});
             Value *cipher = B.CreateLoad(i8, ptr);
