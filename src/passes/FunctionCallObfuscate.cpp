@@ -2142,7 +2142,7 @@ Value *emitCachedResolvedViaException(CallInst *CI, Module &M,
     MB.CreateStore(Slot, Rt.out);
     MB.CreateStore(BlockAddress::get(F, ResolveBB), Rt.cont);
     emitFault(MB);
-    MB.CreateUnreachable();
+    MB.CreateBr(ResolveBB);
 
     IRBuilder<> RB(ResolveBB);
     Value *Resolved =
