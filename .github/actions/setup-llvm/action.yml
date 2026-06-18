@@ -111,7 +111,12 @@ runs:
           # exported symbols to a curated plugin-API list that omits symbols the
           # Morok passes use (e.g. llvm::CallbackVH::anchor), so the plugin fails
           # to dlopen. We instead rely on full symbol export (Mach-O default on
-          # macOS; --export-dynamic on Linux below).
+          # macOS; --export-dynamic on Linux below).  On Windows the tool's
+          # export set is irrelevant: the plugin statically links the LLVM libs
+          # it needs into the DLL (src/pipeline/CMakeLists.txt), importing no
+          # LLVM from the host.  Do NOT add LLVM_BUILD_LLVM_DYLIB /
+          # LLVM_LINK_LLVM_DYLIB / BUILD_SHARED_LIBS either: all are unsupported
+          # on the MSVC LLVM build (the 65535 PE export limit) and would fail it.
           -DLLVM_EXPORT_SYMBOLS_FOR_PLUGINS=OFF
           -DLLVM_OPTIMIZED_TABLEGEN=ON
           -DLLVM_PARALLEL_LINK_JOBS=2

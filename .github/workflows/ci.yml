@@ -203,6 +203,54 @@ jobs:
           jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
           ctest --test-dir build --output-on-failure --timeout 1200 --parallel "$jobs"
 
+      - name: Smoke-test the Windows plugin DLL
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dll=""
+          for f in build/src/pipeline/libMorok.dll build/src/pipeline/Morok.dll; do
+            [ -f "$f" ] && dll="$f" && break
+          done
+          [ -n "$dll" ] || { echo "::error::no Morok plugin DLL under build/src/pipeline"; ls -la build/src/pipeline || true; exit 1; }
+          clang="${{ steps.llvm.outputs.clang }}"
+          opt="$(dirname "$clang")/opt.exe"
+          [ -x "$opt" ] || { echo "::error::opt.exe missing next to clang"; ls -la "$(dirname "$clang")" || true; exit 1; }
+          echo "plugin=$dll opt=$opt"
+          printf 'define i32 @f(i32 %%a, i32 %%b) {\nentry:\n  %%x = add i32 %%a, 1337\n  %%y = xor i32 %%x, %%b\n  ret i32 %%y\n}\n' > t.ll
+          # (1) the DLL loads and the New-PM plugin API is accepted.
+          "$opt" -load-pass-plugin="$dll" -passes='no-op-module' t.ll -S -o /dev/null
+          # (2) canonical baseline (pure opt, no plugin) for a like-for-like diff.
+          "$opt" -passes='verify' t.ll -S -o canon.ll
+          # (3) the morok pipeline runs (config driven by MOROK_PRESET env, since
+          #     the plugin's cl::opts are not parsed by the host on Windows).
+          MOROK_PRESET=max "$opt" -load-pass-plugin="$dll" -passes='morok' t.ll -S -o full.ll
+          test -s full.ll
+          # (4) the transformed IR is still well-formed (catches any ABI / dyn_cast
+          #     corruption from a duplicate-state field-offset mismatch).
+          "$opt" -passes='verify' full.ll -S -o /dev/null
+          # (5) it actually transformed (proves the plugin is not inert).
+          if diff -q canon.ll full.ll >/dev/null; then
+            echo "::error::-passes=morok (MOROK_PRESET=max) did not transform — plugin inert"
+            exit 1
+          fi
+          echo "Windows plugin DLL is usable (opt -load-pass-plugin path verified)."
+          # (6) clang -fpass-plugin auto-injection.  On Windows the plugin's
+          #     cl::opts are not visible to clang's option parser (separate LLVM
+          #     registry), so '-mllvm -morok' is unknown there; the portable
+          #     switch is MOROK_ENABLE (+ MOROK_PRESET for config).  Prove it
+          #     compiles AND that the plugin actually engaged (obfuscated object
+          #     differs from a clean one).
+          printf 'int f(int a,int b){int x=a+1337;return x^b;}\n' > t.c
+          "$clang" -O2 -c t.c -o clean.o
+          MOROK_ENABLE=1 MOROK_PRESET=max "$clang" -fpass-plugin="$dll" -O2 -c t.c -o obf.o
+          test -s obf.o
+          if cmp -s clean.o obf.o; then
+            echo "::error::clang -fpass-plugin produced an identical object — plugin did not engage"
+            exit 1
+          fi
+          echo "clang -fpass-plugin auto-injection verified (MOROK_ENABLE)."
+
       - name: Package artifacts
         id: pkg
         shell: bash
@@ -214,18 +262,22 @@ jobs:
           cp LICENSE README.md "dist/$stage/" 2>/dev/null || true
 
           if [ "$RUNNER_OS" = "Windows" ]; then
-            # No loadable plugin on Windows (see src/pipeline/CMakeLists.txt):
-            # ship the static obfuscator libraries + public headers.
-            mkdir -p "dist/$stage/lib" "dist/$stage/include"
-            found=0
-            while IFS= read -r lib; do
-              cp "$lib" "dist/$stage/lib/"; found=1
-            done < <(find build/src -type f \( -name '*.lib' -o -name '*.a' \) 2>/dev/null)
-            if [ "$found" -ne 1 ]; then
-              echo "::error::no Morok static libraries found under build/src"
-              find build/src -type f \( -name '*.lib' -o -name '*.a' \) || true
+            # Loadable New-PM plugin DLL (the LLVM it needs is statically linked
+            # into the MODULE; see src/pipeline/CMakeLists.txt), plus the static
+            # obfuscator libraries + public headers for in-process consumers.
+            dllfound=0
+            for f in build/src/pipeline/libMorok.dll build/src/pipeline/Morok.dll; do
+              if [ -f "$f" ]; then cp "$f" "dist/$stage/"; dllfound=1; fi
+            done
+            if [ "$dllfound" -ne 1 ]; then
+              echo "::error::no Morok plugin DLL found under build/src/pipeline"
+              ls -la build/src/pipeline || true
               exit 1
             fi
+            mkdir -p "dist/$stage/lib" "dist/$stage/include"
+            while IFS= read -r lib; do
+              cp "$lib" "dist/$stage/lib/"
+            done < <(find build/src -type f \( -name '*.lib' -o -name '*.a' \) 2>/dev/null)
             cp -R include/. "dist/$stage/include/"
             ( cd dist && 7z a -tzip "${stage}.zip" "$stage" >/dev/null )
             echo "archive=dist/${stage}.zip" >> "$GITHUB_OUTPUT"

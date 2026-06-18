@@ -90,6 +90,17 @@ cl::opt<std::uint64_t>
     MorokSeed("morok-seed", cl::init(0),
               cl::desc("Deterministic PRNG seed (0 = entropy)."));
 
+// Whether the auto-injection (clang -fpass-plugin) entry points should fire.
+// On Unix this is driven by the `-morok` cl::opt (`-mllvm -morok`).  On Windows
+// the plugin's cl::opts register into its own static-LLVM registry, which the
+// host clang's option parser never sees ("Unknown command line argument
+// '-morok'"), so the MOROK_ENABLE env var is the portable switch there.  The
+// env var is also a convenient opt-in on Unix; it never overrides an explicit
+// disable since EnableMorok defaults off.
+bool morokAutoInjectEnabled() {
+    return EnableMorok || std::getenv("MOROK_ENABLE") != nullptr;
+}
+
 // Resolve the effective configuration from flags / environment / file.
 morok::config::Config loadConfig() {
     using namespace morok::config;
@@ -111,13 +122,27 @@ morok::config::Config loadConfig() {
         }
     }
 
-    if (!fromFile && !MorokPreset.empty()) {
-        cfg.preset = parsePreset(MorokPreset);
-        cfg.passes = presetConfig(cfg.preset);
+    if (!fromFile) {
+        // The preset flag falls back to MOROK_PRESET.  On Windows the plugin's
+        // cl::opts register into its own (host-unparsed) registry, so env is
+        // the only way to drive the preset there; on Unix the cl::opt still
+        // wins because it is non-empty when set.
+        std::string preset = MorokPreset;
+        if (preset.empty())
+            if (const char *env = std::getenv("MOROK_PRESET"))
+                preset = env;
+        if (!preset.empty()) {
+            cfg.preset = parsePreset(preset);
+            cfg.passes = presetConfig(cfg.preset);
+        }
     }
 
-    if (MorokSeed != 0)
-        cfg.seed = MorokSeed;
+    std::uint64_t seed = MorokSeed;
+    if (seed == 0)
+        if (const char *env = std::getenv("MOROK_SEED"))
+            seed = std::strtoull(env, nullptr, 0);
+    if (seed != 0)
+        cfg.seed = seed;
 
     return cfg;
 }
@@ -458,7 +483,7 @@ PassPluginLibraryInfo getPluginInfo() {
                 PB.registerOptimizerLastEPCallback([](ModulePassManager &MPM,
                                                       OptimizationLevel,
                                                       ThinOrFullLTOPhase) {
-                    if (EnableMorok) {
+                    if (morokAutoInjectEnabled()) {
                         auto cfg = loadConfig();
                         cfg.passes.opt_amplify.enabled = false;
                         MPM.addPass(MorokPass(cfg));
@@ -467,7 +492,7 @@ PassPluginLibraryInfo getPluginInfo() {
 
                 PB.registerVectorizerStartEPCallback(
                     [](FunctionPassManager &FPM, OptimizationLevel) {
-                        if (EnableMorok)
+                        if (morokAutoInjectEnabled())
                             FPM.addPass(
                                 EarlyOptimizerAmplificationPass(loadConfig()));
                 });
