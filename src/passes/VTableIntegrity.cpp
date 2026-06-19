@@ -437,7 +437,14 @@ Function *createVerifier(Module &M, ArrayRef<GuardEntry> Entries) {
     Value *Next =
         B.CreateAdd(Index, ConstantInt::get(IdxTy, 1), "morok.vti.next");
     Index->addIncoming(Next, NextBB);
-    B.CreateCondBr(B.CreateICmpULT(Next, EntryCount), LoopBB, FailBB);
+    // Loop exhausted with no harvested vtable matching the live (vptr, slot):
+    // the dispatch recognizer is heuristic and also matches ordinary
+    // callback/ops tables, whose pointer is not a known _ZTV address point and
+    // is statically indistinguishable from a vptr swap.  Allow the call through
+    // instead of trapping — trapping here is a reliable DoS on legitimate
+    // function-pointer-table code.  A recognized vtable whose target was
+    // tampered in place is still caught by the hash check (FailBB) below.
+    B.CreateCondBr(B.CreateICmpULT(Next, EntryCount), LoopBB, PassBB);
 
     B.SetInsertPoint(PassBB);
     B.CreateRetVoid();

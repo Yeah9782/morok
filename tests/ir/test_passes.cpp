@@ -10764,6 +10764,66 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+// Regression for #48: the dispatch recognizer is heuristic and also matches
+// ordinary callback/ops tables, whose pointer is not a known _ZTV address point.
+// The verifier's loop-exhaustion path (no harvested vtable matched the live
+// vptr) used to llvm.trap(), turning a legitimate function-pointer-table call
+// into a reliable abort (DoS).  That path now returns instead; only a recognized
+// vtable with an in-place tampered target still traps — so the trap block has a
+// single incoming edge (the hash mismatch), not two.
+TEST_CASE("vtableIntegrityModule allows unrecognized dispatch tables through") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target datalayout = "e-p:64:64"
+@_ZTV4Base = linkonce_odr unnamed_addr constant { [4 x ptr] } { [4 x ptr] [ptr null, ptr null, ptr @virt0, ptr @virt1] }
+
+define i32 @virt0(ptr %this) {
+entry:
+  ret i32 7
+}
+
+define i32 @virt1(ptr %this) {
+entry:
+  ret i32 11
+}
+
+define i32 @dispatch_ptr_gep(ptr %obj) {
+entry:
+  %vptr = load ptr, ptr %obj
+  %slotp = getelementptr ptr, ptr %vptr, i64 1
+  %fn = load ptr, ptr %slotp
+  %r = call i32 %fn(ptr %obj)
+  ret i32 %r
+}
+)ir");
+
+    CHECK(morok::passes::vtableIntegrityModule(*M));
+    Function *Verify = M->getFunction("morok.vti.verify");
+    REQUIRE(Verify);
+
+    // Find the abort block (llvm.trap).
+    BasicBlock *TrapBB = nullptr;
+    for (BasicBlock &BB : *Verify)
+        for (Instruction &I : BB)
+            if (auto *CI = dyn_cast<CallInst>(&I))
+                if (Function *Callee = CI->getCalledFunction())
+                    if (Callee->getName() == "llvm.trap")
+                        TrapBB = &BB;
+    REQUIRE(TrapBB);
+
+    // Exactly one edge reaches the trap (the tamper/hash-mismatch path); the
+    // no-match exhaustion edge now falls through to the return.
+    unsigned trapEdges = 0;
+    for (BasicBlock &BB : *Verify) {
+        Instruction *T = BB.getTerminator();
+        for (unsigned s = 0; s < T->getNumSuccessors(); ++s)
+            if (T->getSuccessor(s) == TrapBB)
+                ++trapEdges;
+    }
+    CHECK(trapEdges == 1u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("vtableIntegrityModule ignores non-vptr indirect calls") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
