@@ -5039,7 +5039,7 @@ void emitAntiDumpGuardPage(IRBuilder<> &B, Module &M, const Triple &TT,
     Mapped->setName(Stem + ".mmap");
     Value *MappedOk = B.CreateAnd(
         B.CreateICmpUGT(Mapped, ConstantInt::get(ip, 4096)),
-        B.CreateICmpNE(Mapped, ConstantInt::get(ip, ~0ULL)),
+        B.CreateICmpULT(Mapped, ConstantInt::getSigned(ip, -4095)),
         Stem + ".mapped");
     BasicBlock *Current = B.GetInsertBlock();
     Function *Fn = Current->getParent();
@@ -7228,7 +7228,7 @@ Function *schrodingerPageProbe(Module &M, GlobalVariable *State,
     mapped->setName("morok.antihook.schro.mmap");
     Value *mappedOk = B.CreateAnd(
         B.CreateICmpUGT(mapped, ConstantInt::get(ip, 4096)),
-        B.CreateICmpNE(mapped, ConstantInt::get(ip, ~0ULL)),
+        B.CreateICmpULT(mapped, ConstantInt::getSigned(ip, -4095)),
         "morok.antihook.schro.mapped");
     B.CreateCondBr(mappedOk, setupBB, retBB);
 
@@ -7615,9 +7615,15 @@ Function *pageFaultTlbProbe(Module &M, GlobalVariable *State,
         B, M, TT, regionSize, ConstantInt::get(ip, 3),
         ConstantInt::get(ip, 2u | mapAnon), "morok.pftlb.mmap");
     mapped->setName("morok.pftlb.mmap");
+    // Reject the WHOLE kernel error range, not just -1: the direct x86_64-Linux
+    // syscall path returns raw negative errno values (e.g. -ENOMEM = -12), which
+    // are large unsigned values that pass a plain != ~0 test.  A syscall result
+    // in [-4095, -1] (i.e. >= (unsigned)-4095) is an error; treating one as a
+    // valid page base would write code bytes to a bogus high address before the
+    // SIGSEGV/SIGBUS handler is installed — a clean no-op turned into a DoS.
     Value *mappedOk = B.CreateAnd(
         B.CreateICmpUGT(mapped, ConstantInt::get(ip, 4096)),
-        B.CreateICmpNE(mapped, ConstantInt::get(ip, ~0ULL)),
+        B.CreateICmpULT(mapped, ConstantInt::getSigned(ip, -4095)),
         "morok.pftlb.mapped");
     B.CreateCondBr(mappedOk, installBusBB, retBB);
 

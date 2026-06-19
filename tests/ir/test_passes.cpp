@@ -13547,6 +13547,35 @@ define i32 @main() { ret i32 0 }
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+// Regression for #70: the direct x86_64-Linux mmap syscall returns -errno (e.g.
+// -ENOMEM = -12) on failure, a large unsigned value that passes a plain != -1
+// check.  The probe must reject the WHOLE kernel error range [-4095,-1] before
+// treating the result as a valid page base; otherwise it writes code bytes to a
+// bogus high address before its SIGSEGV/SIGBUS handler is installed (a DoS).
+TEST_CASE("pageFaultTlbOracleModule rejects raw mmap errno returns") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-unknown-linux-gnu"
+define i32 @main() { ret i32 0 }
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(7001);
+    morok::ir::IRRandom rng(engine);
+    CHECK(morok::passes::pageFaultTlbOracleModule(*M, rng));
+
+    REQUIRE(M->getFunction("morok.pftlb") != nullptr);
+    // The validity check must reject the error range via an unsigned-less-than
+    // against (unsigned)-4095, not merely an inequality against -1.
+    bool rejectsErrnoRange = false;
+    for (Function &F : *M)
+        for (Instruction &I : instructions(F))
+            if (auto *IC = dyn_cast<ICmpInst>(&I))
+                if (IC->getPredicate() == ICmpInst::ICMP_ULT)
+                    if (auto *C = dyn_cast<ConstantInt>(IC->getOperand(1)))
+                        rejectsErrnoRange |= C->getSExtValue() == -4095;
+    CHECK(rejectsErrnoRange);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("pageFaultTlbOracleModule emits Darwin mach-backed fault probe") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
