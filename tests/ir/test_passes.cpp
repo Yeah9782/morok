@@ -13926,11 +13926,13 @@ define i32 @main() { ret i32 0 }
     CHECK(M->getFunction("sigaction") != nullptr);
     CHECK(M->getFunction("signal") == nullptr);
     CHECK(hasInlineAsmCall(*Ctor));
+    CHECK(countNamedInstructions(*Ctor, "morok.trap.sigaction.trap") >= 1u);
+    CHECK(countNamedInstructions(*Ctor, "morok.trap.sigaction.ill") >= 1u);
     CHECK(countNamedInstructions(*Handler, "morok.trap.icebp") >= 1u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_CASE("trapOracleModule emits portable raise fallback on Darwin arm64") {
+TEST_CASE("trapOracleModule preserves Darwin SIGTRAP dispositions with sigaction") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
 target triple = "arm64-apple-macosx13.0.0"
@@ -13942,11 +13944,60 @@ define i32 @main() { ret i32 0 }
     CHECK(morok::passes::trapOracleModule(*M, rng));
 
     Function *Ctor = M->getFunction("morok.trap");
+    Function *Handler = M->getFunction("morok.trap.handler");
     REQUIRE(Ctor != nullptr);
-    CHECK(M->getFunction("morok.trap.handler") != nullptr);
-    CHECK(M->getFunction("signal") != nullptr);
+    REQUIRE(Handler != nullptr);
+    CHECK(Handler->arg_size() == 3);
+    CHECK(M->getFunction("sigaction") != nullptr);
+    CHECK(M->getFunction("signal") == nullptr);
     CHECK(M->getFunction("raise") != nullptr);
+    CHECK(countNamedInstructions(*Ctor, "morok.trap.sigaction.trap") >= 1u);
+    CHECK(countNamedInstructions(*Ctor, "morok.trap.sigaction.ill") == 0u);
     CHECK_FALSE(hasInlineAsmCall(*Ctor));
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("trapOracleModule emits Linux aarch64 sigaction raise fallback") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "aarch64-unknown-linux-gnu"
+define i32 @main() { ret i32 0 }
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(8861);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::trapOracleModule(*M, rng));
+
+    Function *Ctor = M->getFunction("morok.trap");
+    Function *Handler = M->getFunction("morok.trap.handler");
+    REQUIRE(Ctor != nullptr);
+    REQUIRE(Handler != nullptr);
+    CHECK(Handler->arg_size() == 3);
+    CHECK(M->getFunction("sigaction") != nullptr);
+    CHECK(M->getFunction("signal") == nullptr);
+    CHECK(M->getFunction("raise") != nullptr);
+    CHECK(countNamedInstructions(*Ctor, "morok.trap.sigaction.trap") >= 1u);
+    CHECK(countNamedInstructions(*Ctor, "morok.trap.sigaction.ill") == 0u);
+    CHECK_FALSE(hasInlineAsmCall(*Ctor));
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("trapOracleModule skips targets without a safe sigaction layout") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "i386-unknown-linux-gnu"
+define i32 @main() { ret i32 0 }
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(8862);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK_FALSE(morok::passes::trapOracleModule(*M, rng));
+
+    CHECK(M->getFunction("morok.trap") == nullptr);
+    CHECK(M->getFunction("morok.trap.handler") == nullptr);
+    CHECK(M->getFunction("signal") == nullptr);
+    CHECK(M->getFunction("sigaction") == nullptr);
+    CHECK(M->getFunction("raise") == nullptr);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 

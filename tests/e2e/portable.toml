@@ -3,8 +3,6 @@
 # The obfuscator is developed on macOS-arm64, and several max-level passes are
 # not yet ported to other targets:
 #   - virtualization: its bytecode-VM IR crashes the x86 backend on some inputs.
-#   - trap_oracles: its illegal-instruction recovery reads RIP from a hardcoded
-#     Linux-x86_64 ucontext offset, so it SIGILLs on Linux-arm64 / x86 emulation.
 #   - the anti-analysis + mutual-guard battery (anti_hook/anti_dbg/anti_class_dump/
 #     timing_oracles, the SMC-tripwire anti-DBI): Darwin-tuned OS/tamper probes
 #     that fault or false-positive on Linux, so the binary SIGSEGVs on every run.

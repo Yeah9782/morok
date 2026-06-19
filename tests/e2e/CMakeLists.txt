@@ -37,17 +37,23 @@ set(_fco_exception_config
     "${CMAKE_CURRENT_SOURCE_DIR}/fco_exception_threads.toml")
 set(_fco_exception_workload
     "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/fco_exception_threads.c")
+set(_trap_sigaction_driver
+    "${CMAKE_CURRENT_SOURCE_DIR}/trap_sigaction_preserve.sh")
+set(_trap_sigaction_config
+    "${CMAKE_CURRENT_SOURCE_DIR}/trap_sigaction_preserve.toml")
+set(_trap_sigaction_workload
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/trap_sigaction_preserve.c")
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 
 # Platform-aware settings. On Apple the full built-in max/high presets and the
-# aggressive max.toml are exercised. On Linux/Windows several max-level passes are
-# not yet ported and either crash the backend at compile time (virtualization on
-# x86) or fault at run time (trap_oracles SIGILLs off Linux-x86; the anti-analysis
-# + mutual-guard battery SIGSEGVs on Linux), so every high-intensity test there is
-# driven from portable.toml instead — the high preset minus virtualization, which
-# is the maximum intensity that is correct on every platform today. Widen this
-# back toward the full presets as each pass is ported (see portable.toml).
+# aggressive max.toml are exercised. On Linux/Windows several max-level passes
+# are not yet ported: virtualization crashes the backend on x86, and the
+# anti-analysis + mutual-guard battery SIGSEGVs on Linux. Every high-intensity
+# test there is driven from portable.toml instead — the high preset minus
+# virtualization, which is the maximum intensity that is correct on every
+# platform today. Widen this back toward the full presets as each pass is ported
+# (see portable.toml).
 if(APPLE)
   set(_max_setting "max")
   set(_high_setting "high")
@@ -187,6 +193,25 @@ else()
   else()
     message(STATUS "adversarial e2e patch tests skipped (Python3 not found).")
   endif()
+endif()
+
+if(APPLE)
+  add_test(NAME "e2e/trap_sigaction_preserve"
+    COMMAND bash "${_trap_sigaction_driver}"
+            "${CMAKE_C_COMPILER}"
+            "$<TARGET_FILE:morok_plugin>"
+            "${_sysroot}"
+            "${_trap_sigaction_workload}"
+            "${_trap_sigaction_config}"
+            8863)
+  set_tests_properties("e2e/trap_sigaction_preserve" PROPERTIES
+    LABELS "e2e;security;max"
+    REQUIRED_FILES
+      "$<TARGET_FILE:morok_plugin>;${_trap_sigaction_driver};${_trap_sigaction_config};${_trap_sigaction_workload}"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 120)
+else()
+  message(STATUS "Trap sigaction preservation e2e skipped off Darwin.")
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND

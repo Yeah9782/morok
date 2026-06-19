@@ -1358,14 +1358,16 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   paired with a raw OS clock; Darwin targets use `mach_absolute_time` and
   `CLOCK_MONOTONIC_RAW`.  Slow or divergent sample distributions are folded
   into private state instead of causing immediate false-positive-prone exits.
-- TrapOracle temporarily installs a trap handler during startup, fires x86
-  `int3`/`icebp`/trap-flag stimuli where supported, falls back to portable
-  `raise(SIGTRAP)` on non-x86 POSIX targets, and folds missing or swallowed trap
-  delivery into private state before restoring the previous handler.  Linux
-  x86_64 uses a `sigaction` `SA_SIGINFO` handler for both `SIGTRAP` and
-  `SIGILL`, advancing RIP over `icebp` when emulators such as Orb report byte
-  `0xf1` as a non-resumable illegal instruction.  Windows `INT 2Dh`/VEH
-  coverage remains gated on the future Windows foundation.
+- TrapOracle temporarily installs a `sigaction` `SA_SIGINFO` trap disposition
+  during startup only on targets with known user-space layout offsets, fires
+  x86 `int3`/`icebp`/trap-flag stimuli on Linux x86_64 or portable
+  `raise(SIGTRAP)` on the other supported POSIX targets, and folds missing or
+  swallowed trap delivery into private state before restoring the full previous
+  disposition.  Unsupported targets do not fall back to `signal()`.  Linux
+  x86_64 also installs `SIGILL` handling and advances RIP over `icebp` when
+  emulators such as Orb report byte `0xf1` as a non-resumable illegal
+  instruction.  Windows `INT 2Dh`/VEH coverage remains gated on the future
+  Windows foundation.
 - PageFaultTlbOracle is an opt-in POSIX constructor for triples with known
   `ucontext_t` layouts.  It maps several private pages, lays down
   architecture-shaped code islands, temporarily installs `SA_SIGINFO`

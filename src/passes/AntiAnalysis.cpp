@@ -6751,21 +6751,17 @@ Function *trapSignalHandler(Module &M, GlobalVariable *Counter,
     LLVMContext &ctx = M.getContext();
     auto *i32 = Type::getInt32Ty(ctx);
     auto *ptr = PointerType::getUnqual(ctx);
-    const bool siginfo = useLinuxX86SiginfoTrapHandler(TT);
-    SmallVector<Type *, 3> args{i32};
-    if (siginfo) {
-        args.push_back(ptr);
-        args.push_back(ptr);
-    }
+    SmallVector<Type *, 3> args{i32, ptr, ptr};
     auto *fn = Function::Create(
         FunctionType::get(Type::getVoidTy(ctx), args, false),
         GlobalValue::PrivateLinkage, "morok.trap.handler", &M);
     fn->setDSOLocal(true);
     Argument *sig = fn->getArg(0);
     sig->setName("sig");
-    Argument *uctx = siginfo ? fn->getArg(2) : nullptr;
-    if (uctx)
-        uctx->setName("uctx");
+    Argument *info = fn->getArg(1);
+    info->setName("info");
+    Argument *uctx = fn->getArg(2);
+    uctx->setName("uctx");
 
     auto *entry = BasicBlock::Create(ctx, "entry", fn);
     IRBuilder<> B(entry);
@@ -6778,7 +6774,7 @@ Function *trapSignalHandler(Module &M, GlobalVariable *Counter,
     foldState(B, State, sig, 0xC286B9F2B77D6A41ULL, "morok.trap.signal");
     foldState(B, State, next, 0x4F3C2D1E9876A5B1ULL, "morok.trap.count");
 
-    if (siginfo) {
+    if (useLinuxX86SiginfoTrapHandler(TT)) {
         auto *ip = intPtrTy(M);
         auto *i8 = Type::getInt8Ty(ctx);
         auto *checkCtx = BasicBlock::Create(ctx, "morok.trap.ill.ctx", fn);
@@ -6819,14 +6815,6 @@ Function *trapSignalHandler(Module &M, GlobalVariable *Counter,
     return fn;
 }
 
-FunctionCallee signalDecl(Module &M) {
-    LLVMContext &ctx = M.getContext();
-    auto *i32 = Type::getInt32Ty(ctx);
-    auto *ptr = PointerType::getUnqual(ctx);
-    return M.getOrInsertFunction("signal",
-                                 FunctionType::get(ptr, {i32, ptr}, false));
-}
-
 FunctionCallee sigactionDecl(Module &M) {
     LLVMContext &ctx = M.getContext();
     auto *i32 = Type::getInt32Ty(ctx);
@@ -6848,18 +6836,40 @@ void zeroActionBytes(IRBuilder<> &B, Module &M, AllocaInst *Action,
                       gepI8(B, M, Action, constIp(M, i)));
 }
 
-void storeSiginfoAction(IRBuilder<> &B, Module &M, AllocaInst *Action,
-                        Function *Handler) {
-    auto *i32 = Type::getInt32Ty(M.getContext());
-    constexpr std::uint64_t kSigactionSize = 152;
-    constexpr std::uint64_t kFlagsOffset = 136;
-    constexpr std::uint32_t kSaSiginfo = 4;
+struct TrapSigactionLayout {
+    std::uint64_t sigactionSize = 0;
+    std::uint64_t flagsOffset = 0;
+    std::uint32_t saSiginfo = 0;
+};
 
-    zeroActionBytes(B, M, Action, kSigactionSize);
+bool trapSigactionLayout(const Triple &TT, TrapSigactionLayout &L) {
+    if (TT.isOSLinux() &&
+        (TT.getArch() == Triple::x86_64 || TT.getArch() == Triple::aarch64 ||
+         TT.getArch() == Triple::aarch64_be)) {
+        L.sigactionSize = 152;
+        L.flagsOffset = 136;
+        L.saSiginfo = 4;
+        return true;
+    }
+    if (TT.isOSDarwin() &&
+        (TT.getArch() == Triple::x86_64 || TT.getArch() == Triple::aarch64)) {
+        L.sigactionSize = 16;
+        L.flagsOffset = 12;
+        L.saSiginfo = 0x40;
+        return true;
+    }
+    return false;
+}
+
+void storeTrapSiginfoAction(IRBuilder<> &B, Module &M, AllocaInst *Action,
+                            Function *Handler,
+                            const TrapSigactionLayout &Layout) {
+    auto *i32 = Type::getInt32Ty(M.getContext());
+    zeroActionBytes(B, M, Action, Layout.sigactionSize);
     B.CreateStore(Handler, gepI8(B, M, Action, constIp(M, 0),
                                  "morok.trap.sa.handler"));
-    B.CreateStore(ConstantInt::get(i32, kSaSiginfo),
-                  gepI8(B, M, Action, constIp(M, kFlagsOffset),
+    B.CreateStore(ConstantInt::get(i32, Layout.saSiginfo),
+                  gepI8(B, M, Action, constIp(M, Layout.flagsOffset),
                         "morok.trap.sa.flags"));
 }
 
@@ -6873,22 +6883,14 @@ void emitTrapInlineAsm(IRBuilder<> &B, StringRef Asm, StringRef Constraints) {
 unsigned emitTrapStimuli(IRBuilder<> &B, Module &M, const Triple &TT) {
     auto *i32 = Type::getInt32Ty(M.getContext());
     constexpr int kSigTrap = 5;
-    if (isX86Target(TT)) {
+    if (useLinuxX86SiginfoTrapHandler(TT)) {
         emitTrapInlineAsm(B, "int3", "~{dirflag},~{fpsr},~{flags}");
         emitTrapInlineAsm(B, ".byte 0xf1", "~{dirflag},~{fpsr},~{flags}");
-        if (TT.getArch() == Triple::x86_64) {
-            emitTrapInlineAsm(B,
-                              "pushfq\npopq %rax\norq $$256, %rax\npushq "
-                              "%rax\npopfq\nnop\npushfq\npopq %rax\nandq "
-                              "$$-257, %rax\npushq %rax\npopfq",
-                              "~{rax},~{dirflag},~{fpsr},~{flags}");
-        } else {
-            emitTrapInlineAsm(B,
-                              "pushfl\npopl %eax\norl $$256, %eax\npushl "
-                              "%eax\npopfl\nnop\npushfl\npopl %eax\nandl "
-                              "$$-257, %eax\npushl %eax\npopfl",
-                              "~{eax},~{dirflag},~{fpsr},~{flags}");
-        }
+        emitTrapInlineAsm(B,
+                          "pushfq\npopq %rax\norq $$256, %rax\npushq "
+                          "%rax\npopfq\nnop\npushfq\npopq %rax\nandq "
+                          "$$-257, %rax\npushq %rax\npopfq",
+                          "~{rax},~{dirflag},~{fpsr},~{flags}");
         return 3;
     }
 
@@ -11957,8 +11959,14 @@ bool timingOracleModule(Module &M, ir::IRRandom &rng) {
 
 bool trapOracleModule(Module &M, ir::IRRandom &rng) {
     const Triple tt(M.getTargetTriple());
+    TrapSigactionLayout layout;
+    if (intPtrTy(M)->getBitWidth() != 64 || !trapSigactionLayout(tt, layout))
+        return false;
+
     LLVMContext &ctx = M.getContext();
+    auto *i8 = Type::getInt8Ty(ctx);
     auto *i32 = Type::getInt32Ty(ctx);
+    auto *ptr = PointerType::getUnqual(ctx);
     constexpr int kSigTrap = 5;
 
     Function *ctor = makeCtorShell(M, "morok.trap");
@@ -11969,29 +11977,22 @@ bool trapOracleModule(Module &M, ir::IRRandom &rng) {
     IRBuilder<> B(&ctor->getEntryBlock());
     B.CreateStore(ConstantInt::get(i32, 0), counter)->setVolatile(true);
 
-    Value *oldHandler = nullptr;
-    AllocaInst *oldTrapAction = nullptr;
+    auto *actionTy = ArrayType::get(i8, layout.sigactionSize);
+    AllocaInst *newAction = B.CreateAlloca(actionTy, nullptr, "morok.trap.sa");
+    AllocaInst *oldTrapAction =
+        B.CreateAlloca(actionTy, nullptr, "morok.trap.old.trap");
     AllocaInst *oldIllAction = nullptr;
+    storeTrapSiginfoAction(B, M, newAction, handler, layout);
+    FunctionCallee sigactionFn = sigactionDecl(M);
+    B.CreateCall(sigactionFn,
+                 {ConstantInt::get(i32, kSigTrap), newAction, oldTrapAction},
+                 "morok.trap.sigaction.trap");
     if (useLinuxX86SiginfoTrapHandler(tt)) {
         constexpr int kSigIll = 4;
-        auto *actionTy = ArrayType::get(Type::getInt8Ty(ctx), 152);
-        AllocaInst *newAction =
-            B.CreateAlloca(actionTy, nullptr, "morok.trap.sa");
-        oldTrapAction = B.CreateAlloca(actionTy, nullptr, "morok.trap.old.trap");
         oldIllAction = B.CreateAlloca(actionTy, nullptr, "morok.trap.old.ill");
-        storeSiginfoAction(B, M, newAction, handler);
-        FunctionCallee sigactionFn = sigactionDecl(M);
-        B.CreateCall(sigactionFn,
-                     {ConstantInt::get(i32, kSigTrap), newAction,
-                      oldTrapAction},
-                     "morok.trap.sigaction.trap");
         B.CreateCall(sigactionFn,
                      {ConstantInt::get(i32, kSigIll), newAction, oldIllAction},
                      "morok.trap.sigaction.ill");
-    } else {
-        oldHandler = B.CreateCall(
-            signalDecl(M), {ConstantInt::get(i32, kSigTrap), handler},
-            "morok.trap.old.handler");
     }
 
     unsigned expected = emitTrapStimuli(B, M, tt);
@@ -12002,16 +12003,16 @@ bool trapOracleModule(Module &M, ir::IRRandom &rng) {
              0xE2AB41739D08C6F5ULL, "morok.trap.missing");
     if (useLinuxX86SiginfoTrapHandler(tt)) {
         constexpr int kSigIll = 4;
-        FunctionCallee sigactionFn = sigactionDecl(M);
         B.CreateCall(sigactionFn,
                      {ConstantInt::get(i32, kSigTrap), oldTrapAction,
-                      ConstantPointerNull::get(PointerType::getUnqual(ctx))});
+                      ConstantPointerNull::get(ptr)});
         B.CreateCall(sigactionFn,
                      {ConstantInt::get(i32, kSigIll), oldIllAction,
-                      ConstantPointerNull::get(PointerType::getUnqual(ctx))});
+                      ConstantPointerNull::get(ptr)});
     } else {
-        B.CreateCall(signalDecl(M),
-                     {ConstantInt::get(i32, kSigTrap), oldHandler});
+        B.CreateCall(sigactionFn,
+                     {ConstantInt::get(i32, kSigTrap), oldTrapAction,
+                      ConstantPointerNull::get(ptr)});
     }
     B.CreateRetVoid();
     appendToGlobalCtors(M, ctor, 0);
