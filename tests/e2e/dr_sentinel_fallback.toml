@@ -1,0 +1,5 @@
+[global]
+preset = "none"
+
+[passes.anti_debugging]
+enabled = true

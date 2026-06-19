@@ -45,6 +45,12 @@ set(_trap_sigaction_config
     "${CMAKE_CURRENT_SOURCE_DIR}/trap_sigaction_preserve.toml")
 set(_trap_sigaction_workload
     "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/trap_sigaction_preserve.c")
+set(_dr_sentinel_fallback_driver
+    "${CMAKE_CURRENT_SOURCE_DIR}/dr_sentinel_fallback.sh")
+set(_dr_sentinel_fallback_config
+    "${CMAKE_CURRENT_SOURCE_DIR}/dr_sentinel_fallback.toml")
+set(_dr_sentinel_fallback_workload
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/dr_sentinel_fallback.c")
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 
@@ -248,8 +254,23 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
       "$<TARGET_FILE:morok_plugin>;${_fco_exception_driver};${_fco_exception_config};${_fco_exception_workload}"
     SKIP_RETURN_CODE 77
     TIMEOUT 120)
+
+  add_test(NAME "e2e/dr_sentinel_fallback"
+    COMMAND bash "${_dr_sentinel_fallback_driver}"
+            "${CMAKE_C_COMPILER}"
+            "$<TARGET_FILE:morok_plugin>"
+            "${_sysroot}"
+            "${_dr_sentinel_fallback_workload}"
+            "${_dr_sentinel_fallback_config}"
+            4949)
+  set_tests_properties("e2e/dr_sentinel_fallback" PROPERTIES
+    LABELS "e2e;security;linux"
+    REQUIRED_FILES
+      "$<TARGET_FILE:morok_plugin>;${_dr_sentinel_fallback_driver};${_dr_sentinel_fallback_config};${_dr_sentinel_fallback_workload}"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 120)
 else()
-  message(STATUS "FCO exception thread stress skipped off Linux x86_64.")
+  message(STATUS "Linux x86_64 security e2e tests skipped on this host.")
 endif()
 
 # The full sample-program compile sweep runs only when the corpus is present.
