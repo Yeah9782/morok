@@ -339,7 +339,8 @@ python3 tools/morok-audit.py build/cross --release --require-sealed-manifest \
   --provenance build/cross/morok-audit.json
 ```
 
-The audit writes a provenance manifest with file hashes, detected binary
+The audit verifies self-check, mutual-guard, and caller-keyed-dispatch post-link
+records, then writes a provenance manifest with file hashes, detected binary
 formats, sealed-manifest counts, and any findings. Release findings are hard
 failures. Test fixtures must be allowlisted explicitly with a versioned JSON
 file:

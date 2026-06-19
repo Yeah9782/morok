@@ -387,6 +387,39 @@ class Auditor:
             sealed = False
         return sealed
 
+    def audit_ckd_node(
+        self,
+        path: Path,
+        binary: adv.Binary,
+        manifest: adv.CkdManifest,
+        node: adv.CkdNodeManifest,
+    ) -> bool:
+        sealed = True
+        if (
+            node.salt != 0
+            or node.mul != 0
+            or node.add != 0
+            or node.rot != 0
+            or node.region_bytes != 0
+        ):
+            self.emit_finding(
+                "unsealed-manifest",
+                path,
+                f"caller-keyed-dispatch manifest file+0x{manifest.offset:x} node {node.index} "
+                "retains dispatch/hash oracle data",
+            )
+            sealed = False
+        code_size = self.read_u32_at_addr(binary, node.code_size)
+        if code_size in (None, 0, UNSEALED_CODE_SIZE):
+            self.emit_finding(
+                "placeholder-manifest",
+                path,
+                f"caller-keyed-dispatch manifest file+0x{manifest.offset:x} node {node.index} "
+                "has unsealed code size",
+            )
+            sealed = False
+        return sealed
+
     def audit_binary(self, path: Path) -> None:
         data = self.read_bytes(path)
         try:
@@ -415,6 +448,11 @@ class Auditor:
             for node in manifest.nodes:
                 total += 1
                 if self.audit_mg_node(path, binary, manifest, node):
+                    sealed += 1
+        for manifest in binary.find_ckd_manifests(require_patchable=False):
+            for node in manifest.nodes:
+                total += 1
+                if self.audit_ckd_node(path, binary, manifest, node):
                     sealed += 1
 
         self.is_macho_signature_valid(path, binary)

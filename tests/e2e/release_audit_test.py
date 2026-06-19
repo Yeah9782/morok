@@ -13,6 +13,8 @@ from pathlib import Path
 
 BASE = 0x400000
 SC_MAGIC = 0xA7D13C5E9000C3B2
+CKD_MAGIC = 0xC30D5B11A6E48F27
+UNSEALED_CODE_SIZE = 0xFFFFFFFF
 
 
 def write_synthetic_elf(path: Path, *, sealed: bool, manifest: bool = True) -> None:
@@ -67,6 +69,72 @@ def write_synthetic_elf(path: Path, *, sealed: bool, manifest: bool = True) -> N
     path.write_bytes(data)
 
 
+def write_synthetic_ckd_elf(path: Path, *, sealed: bool) -> None:
+    size = 0x900
+    data = bytearray(size)
+    ident = b"\x7fELF" + bytes([2, 1, 1]) + b"\0" * 9
+    struct.pack_into(
+        "<16sHHIQQQIHHHHHH",
+        data,
+        0,
+        ident,
+        2,
+        62,
+        1,
+        BASE,
+        64,
+        0,
+        0,
+        64,
+        56,
+        1,
+        0,
+        0,
+        0,
+    )
+    struct.pack_into("<IIQQQQQQ", data, 64, 1, 5, 0, BASE, BASE, size, size, 0x1000)
+
+    manifest_off = 0x200
+    rec_off = manifest_off + 16
+    encoded_off = 0x300
+    code_size_off = 0x308
+    dispatcher_off = 0x400
+    site_off = 0x410
+    target_off = 0x430
+    data[site_off : site_off + 16] = b"\x55\x48\x89\xe5\x90\x90\x90\xc3" * 2
+    data[target_off : target_off + 16] = b"\x55\x48\x89\xe5\x90\x90\x90\xc3" * 2
+
+    struct.pack_into("<Q", data, manifest_off, CKD_MAGIC)
+    struct.pack_into("<I", data, manifest_off + 8, 1)
+    struct.pack_into("<I", data, manifest_off + 12, 1)
+    for rel, value in (
+        (0, BASE + encoded_off),
+        (8, BASE + code_size_off),
+        (16, BASE + dispatcher_off),
+        (24, BASE + site_off),
+        (32, BASE + target_off),
+    ):
+        struct.pack_into("<Q", data, rec_off + rel, value)
+
+    if sealed:
+        struct.pack_into("<Q", data, encoded_off, 0x8190A1B2C3D4E5F6)
+        struct.pack_into("<I", data, code_size_off, 16)
+        struct.pack_into("<Q", data, rec_off + 40, 0)
+        struct.pack_into("<Q", data, rec_off + 48, 0)
+        struct.pack_into("<Q", data, rec_off + 56, 0)
+        struct.pack_into("<I", data, rec_off + 64, 0)
+        struct.pack_into("<I", data, rec_off + 68, 0)
+    else:
+        struct.pack_into("<Q", data, encoded_off, 0)
+        struct.pack_into("<I", data, code_size_off, UNSEALED_CODE_SIZE)
+        struct.pack_into("<Q", data, rec_off + 40, 0x1111222233334444)
+        struct.pack_into("<Q", data, rec_off + 48, 0x5555666677778889)
+        struct.pack_into("<Q", data, rec_off + 56, 0x9999AAAABBBBCCCD)
+        struct.pack_into("<I", data, rec_off + 64, 17)
+        struct.pack_into("<I", data, rec_off + 68, 16)
+    path.write_bytes(data)
+
+
 def run(tool: Path, bundle: Path, *extra: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(tool), str(bundle), "--release", *extra],
@@ -109,6 +177,29 @@ def main(argv: list[str]) -> int:
         payload = json.loads(provenance.read_text())
         assert payload["binaries"][0]["sealed_manifests"] == 1
         assert payload["findings"] == []
+
+        ckd_good = tmp / "ckd-good"
+        ckd_good.mkdir()
+        write_synthetic_ckd_elf(ckd_good / "app", sealed=True)
+        provenance = ckd_good / "morok-audit.json"
+        result = run(
+            tool,
+            ckd_good,
+            "--require-sealed-manifest",
+            "--provenance",
+            str(provenance),
+        )
+        require_ok(result)
+        payload = json.loads(provenance.read_text())
+        assert payload["binaries"][0]["sealed_manifests"] == 1
+
+        ckd_unsealed = tmp / "ckd-unsealed"
+        ckd_unsealed.mkdir()
+        write_synthetic_ckd_elf(ckd_unsealed / "app", sealed=False)
+        require_fail(
+            run(tool, ckd_unsealed, "--require-sealed-manifest"),
+            "caller-keyed-dispatch",
+        )
 
         unsealed = tmp / "unsealed"
         unsealed.mkdir()
