@@ -608,7 +608,7 @@ does not require a plaintext sentinel to survive in `.rodata`.
 | Fault-paged payload delivery | `morok-fpp` | `fault_paged_payload` | Encrypts VM bytecode per page and replaces direct bytecode loads with a lazy accessor that decrypts one page-local cache at a time, re-clears page state on switches, and binds anomalous access to the `fault_paged_payload` runtime seal channel. |
 | Hash-gated self-decrypt | `morok-selfdecrypt` | `hash_gated_self_decrypt` | Lazily decrypts VM bytecode from runtime hashes/context and re-encrypts on helper exit. |
 | External proof binding | `morok-proofbind` | `external_secret_binding` | Materializes a proof feed/finish API and folds proof-derived material into the `external_proof` runtime seal channel instead of returning a branchable verdict. |
-| Tracer attestation | `morok-tracer` | `tracer_attestation` | Uses a Linux/x86_64 buddy tracer to inject runtime-only share words into the parent and folds them into the `tracer` runtime seal channel. |
+| Tracer attestation | `morok-tracer` | `tracer_attestation` | Uses a Linux/x86_64 buddy tracer to inject runtime-only share words into the parent, folds them into the `tracer` runtime seal channel, and folds delivery mismatch into the consumed anti-debug seal. |
 | Self-checksum constants | `morok-selfcheck` | `self_checksum_constants` | Fuses constants with runtime checksum diffs so tamper corrupts data instead of branching. |
 | Mutual guard graph | `morok-mutualguard` | `mutual_guard_graph` | Emits overlapping checksum nodes whose aggregate diff poisons scalar returns. |
 | Data-flow integrity | `morok-dfi` | `data_flow_integrity` | Decodes narrow op tables from runtime integrity hashes and decoy hidden state. |

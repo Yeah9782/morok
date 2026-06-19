@@ -349,8 +349,24 @@ void emitShareRound(Module &M, Function &Ctor, IRBuilder<> &B,
     auto *Loaded = FoldB.CreateLoad(I64, Slot, "morok.tracer.word");
     Loaded->setVolatile(true);
     Loaded->setAlignment(Align(8));
+    Value *ParentSelf =
+        emitLinuxSyscall(FoldB, M, SysGetpid, {}, "morok.tracer.parent.pid");
+    Value *ParentSlotAddr =
+        FoldB.CreatePtrToInt(Slot, I64, "morok.tracer.parent.slot");
+    Value *Expected =
+        FoldB.CreateCall(ShareHelper->getFunctionType(), ShareHelper,
+                         {FoldB.CreateZExtOrTrunc(ParentSelf, I64),
+                          FoldB.CreateZExtOrTrunc(Pid, I64), ParentSlotAddr,
+                          ConstantInt::get(I64, Index)},
+                         "morok.tracer.expected");
+    Value *Mismatch = FoldB.CreateICmpNE(
+        FoldB.CreateXor(Loaded, Expected, "morok.tracer.word.diff"),
+        ConstantInt::get(I64, 0), "morok.tracer.word.bad");
     runtime_seal::foldWord(FoldB, runtime_seal::kTracerChannel, Loaded,
                            FoldSalt, "morok.tracer.seal");
+    runtime_seal::foldFlag(FoldB, runtime_seal::kAntiDebugChannel, Mismatch,
+                           FoldSalt ^ 0x8A6F0E4D27D5C139ULL,
+                           "morok.tracer.antidbg");
     FoldB.CreateBr(ContBB);
 
     B.SetInsertPoint(ContBB);
@@ -369,8 +385,10 @@ bool tracerAttestationModule(Module &M, const TracerAttestationParams &Params,
         M.getFunction(kCtorName))
         return false;
 
-    if (Params.bind_to_runtime_seal)
+    if (Params.bind_to_runtime_seal) {
         runtime_seal::getChannel(M, runtime_seal::kTracerChannel, Rng);
+        runtime_seal::getChannel(M, runtime_seal::kAntiDebugChannel, Rng);
+    }
 
     Function *ShareHelper = getShareHelper(M, Rng, Params.virtualize_helpers);
     Function *Ctor = makeCtorShell(M);

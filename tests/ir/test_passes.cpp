@@ -8750,6 +8750,9 @@ entry:
     GlobalVariable *Seal =
         M->getGlobalVariable("morok.seal.root.tracer", true);
     REQUIRE(Seal != nullptr);
+    GlobalVariable *AntiSeal =
+        M->getGlobalVariable("morok.seal.root.anti_debug", true);
+    REQUIRE(AntiSeal != nullptr);
     Function *Ctor = M->getFunction("morok.tracer.attest");
     Function *Share = M->getFunction("morok.tracer.share");
     REQUIRE(Ctor != nullptr);
@@ -8762,12 +8765,14 @@ entry:
     CHECK(M->getFunction("fork") == nullptr);
     CHECK(M->getFunction("wait4") == nullptr);
     CHECK(hasInlineAsmCall(*Ctor));
-    CHECK(countCallsTo(*Ctor, "morok.tracer.share") == 2u);
+    CHECK(countCallsTo(*Ctor, "morok.tracer.share") == 4u);
     CHECK(countNamedInstructions(*Ctor, "morok.tracer.fork") == 2u);
     CHECK(countNamedInstructions(*Ctor, "morok.tracer.attach.rc") == 2u);
     CHECK(countNamedInstructions(*Ctor, "morok.tracer.poke") == 2u);
     CHECK(countNamedInstructions(*Ctor, "morok.tracer.restore.ptracer") == 2u);
+    CHECK(countNamedInstructions(*Ctor, "morok.tracer.expected") == 2u);
     CHECK(countNamedInstructions(*Ctor, "morok.tracer.seal.next") == 2u);
+    CHECK(countNamedInstructions(*Ctor, "morok.tracer.antidbg.next") == 2u);
     CHECK(countNamedInstructions(*Share, "morok.tracer.share.mix") >= 2u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
