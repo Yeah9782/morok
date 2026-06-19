@@ -7305,6 +7305,53 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+// Regression for #83: a constant verdict return must be fused EXACTLY ONCE.
+// emitFusedConstant rewrites `ret i32 1` to `(enc ^ mask) ^ diff`; the later
+// poisonReturns() must not then XOR the SAME deterministic diff a second time,
+// because `(x ^ diff) ^ diff == x` collapses the value back to the original
+// constant and silently cancels the self-check on the returned verdict.
+TEST_CASE("selfChecksumConstantsFunction poisons a constant return only once") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @selfcheck_const_ret() {
+entry:
+  ret i32 1
+}
+)ir");
+    Function *F = M->getFunction("selfcheck_const_ret");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(2026);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::selfChecksumConstantsFunction(
+        *F, {/*probability=*/100, /*max_constants=*/8, /*region_bytes=*/32},
+        rng));
+
+    Function *Diff = M->getFunction("morok.sc.diff.selfcheck_const_ret");
+    REQUIRE(Diff);
+
+    // The fused return carries exactly one call to the deterministic diff
+    // helper.  Two calls would algebraically cancel and revert the verdict.
+    unsigned DiffCalls = 0;
+    ReturnInst *Ret = nullptr;
+    for (Instruction &I : instructions(*F)) {
+        if (auto *CI = dyn_cast<CallInst>(&I))
+            if (CI->getCalledFunction() == Diff)
+                ++DiffCalls;
+        if (auto *RI = dyn_cast<ReturnInst>(&I))
+            Ret = RI;
+    }
+    CHECK(DiffCalls == 1u);
+
+    // The return operand stays a live, non-constant computation (the
+    // seal-dependent diff is preserved, not double-folded away), and the
+    // poison-return rewrite must not have touched an already-fused return.
+    REQUIRE(Ret);
+    CHECK_FALSE(isa<Constant>(Ret->getReturnValue()));
+    CHECK_FALSE(Ret->getReturnValue()->getName().starts_with("morok.sc.ret"));
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE(
     "selfChecksumConstantsFunction fuses ordinary call argument literals") {
     LLVMContext ctx;

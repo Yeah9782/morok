@@ -633,14 +633,22 @@ Value *emitFusedConstant(Function &F, Runtime &R, Instruction &User,
 // constants the function uses internally.  On an intact + sealed binary the
 // diff is zero and the return is byte-for-byte unchanged.
 void poisonReturns(Function &F, Runtime &R, const SelfChecksumParams &Params,
-                   ir::IRRandom &Rng) {
+                   ir::IRRandom &Rng,
+                   const SmallPtrSetImpl<const ReturnInst *> &AlreadyFused) {
     SmallVector<ReturnInst *, 8> Returns;
     for (BasicBlock &BB : F) {
         auto *RI = dyn_cast<ReturnInst>(BB.getTerminator());
         if (!RI || RI->getNumOperands() != 1 || ir::isMustTailReturn(*RI))
             continue;
         if (isa<Constant>(RI->getOperand(0)))
-            continue; // already handled as a constant target
+            continue; // still a constant: handled (or skipped) as a const target
+        // A return whose constant operand was just fused by emitFusedConstant is
+        // no longer a Constant but already carries the seal-dependent diff.
+        // Folding the same deterministic diff again here would XOR it twice and
+        // cancel the tamper corruption (`(orig^diff)^diff == orig`), silently
+        // disabling the self-check on constant verdict returns.  Skip them.
+        if (AlreadyFused.contains(RI))
+            continue;
         Returns.push_back(RI);
     }
 
@@ -747,6 +755,9 @@ bool selfChecksumConstantsFunction(Function &F,
         return Edge->getTerminator();
     };
 
+    // Track constant returns fused below so poisonReturns does not fold the same
+    // deterministic diff into them a second time (which would cancel out).
+    SmallPtrSet<const ReturnInst *, 8> FusedReturns;
     for (const Target &T : Selected) {
         Instruction *InsertBefore = insertionPoint(T);
         if (!InsertBefore)
@@ -764,10 +775,12 @@ bool selfChecksumConstantsFunction(Function &F,
             PN->setIncomingValue(static_cast<unsigned>(IncomingIndex), Repl);
         } else {
             T.user->setOperand(T.index, Repl);
+            if (auto *RI = dyn_cast<ReturnInst>(T.user))
+                FusedReturns.insert(RI);
         }
     }
 
-    poisonReturns(F, R, Params, Rng);
+    poisonReturns(F, R, Params, Rng, FusedReturns);
 
     relaxMemoryAttrs(F);
     invalidateCallerEffects(F);
