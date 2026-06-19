@@ -13012,6 +13012,16 @@ entry:
           1u);
     CHECK(countNamedInstructions(*Resolve, "morok.win.pe.forwarder") >= 1u);
     CHECK(countNamedInstructions(*Resolve, "morok.win.pe.func.safe") >= 1u);
+
+    Function *WinResolve = M->getFunction("morok.fco.resolve.windows");
+    REQUIRE(WinResolve != nullptr);
+    CHECK(countNamedInstructions(*WinResolve, "morok.fco.win.resolved.phi") >=
+          1u);
+    CHECK(countNamedInstructions(*WinResolve, "morok.fco.win.candidate.next") >=
+          1u);
+    CHECK(countNamedInstructions(*WinResolve, "morok.fco.win.collision.next") >=
+          1u);
+    CHECK(countNamedInstructions(*WinResolve, "morok.fco.win.unique") >= 1u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 

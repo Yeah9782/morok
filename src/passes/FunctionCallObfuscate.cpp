@@ -509,7 +509,7 @@ Function *windowsHashResolver(Module &M) {
     auto *Body = BasicBlock::Create(Ctx, "body", Fn);
     auto *Check = BasicBlock::Create(Ctx, "check", Fn);
     auto *Next = BasicBlock::Create(Ctx, "next", Fn);
-    auto *RetFound = BasicBlock::Create(Ctx, "ret.found", Fn);
+    auto *RetDone = BasicBlock::Create(Ctx, "ret.done", Fn);
     auto *RetNull = BasicBlock::Create(Ctx, "ret.null", Fn);
 
     IRBuilder<> B(Entry);
@@ -530,13 +530,18 @@ Function *windowsHashResolver(Module &M) {
     IRBuilder<> LB(Loop);
     auto *Cursor = LB.CreatePHI(IP, 2, "morok.fco.win.cursor");
     auto *Idx = LB.CreatePHI(I32, 2, "morok.fco.win.idx");
+    auto *Candidate = LB.CreatePHI(IP, 2, "morok.fco.win.candidate");
+    auto *Collision =
+        LB.CreatePHI(Type::getInt1Ty(Ctx), 2, "morok.fco.win.collision");
     Cursor->addIncoming(First, Entry);
     Idx->addIncoming(ConstantInt::get(I32, 0), Entry);
+    Candidate->addIncoming(ConstantInt::get(IP, 0), Entry);
+    Collision->addIncoming(ConstantInt::getFalse(Ctx), Entry);
     LB.CreateCondBr(
         LB.CreateAnd(LB.CreateICmpULT(Idx, ConstantInt::get(I32, 64)),
                      LB.CreateICmpNE(Cursor, Head),
                      "morok.fco.win.keep.walking"),
-        Body, RetNull);
+        Body, RetDone);
 
     IRBuilder<> BB(Body);
     Value *EntryBase =
@@ -550,13 +555,34 @@ Function *windowsHashResolver(Module &M) {
                     Next);
 
     IRBuilder<> CB(Check);
-    Value *Resolved =
+    Value *ResolvedValue =
         CB.CreateCall(windowsPeExportResolver(M), {DllBase, Wanted},
                       "morok.fco.win.resolved.int");
-    CB.CreateCondBr(CB.CreateICmpNE(Resolved, ConstantInt::get(IP, 0)),
-                    RetFound, Next);
+    CB.CreateBr(Next);
 
     IRBuilder<> NB(Next);
+    auto *Resolved = NB.CreatePHI(IP, 2, "morok.fco.win.resolved.phi");
+    Resolved->addIncoming(ConstantInt::get(IP, 0), Body);
+    Resolved->addIncoming(ResolvedValue, Check);
+    Value *HasResolved =
+        NB.CreateICmpNE(Resolved, ConstantInt::get(IP, 0),
+                        "morok.fco.win.resolved.any");
+    Value *HasCandidate =
+        NB.CreateICmpNE(Candidate, ConstantInt::get(IP, 0),
+                        "morok.fco.win.candidate.any");
+    Value *SameCandidate =
+        NB.CreateICmpEQ(Resolved, Candidate, "morok.fco.win.candidate.same");
+    Value *FirstMatch =
+        NB.CreateAnd(HasResolved, NB.CreateNot(HasCandidate),
+                     "morok.fco.win.candidate.first");
+    Value *CollisionHit = NB.CreateAnd(
+        HasResolved, NB.CreateAnd(HasCandidate, NB.CreateNot(SameCandidate)),
+        "morok.fco.win.collision.hit");
+    Value *NextCandidate =
+        NB.CreateSelect(FirstMatch, Resolved, Candidate,
+                        "morok.fco.win.candidate.next");
+    Value *NextCollision =
+        NB.CreateOr(Collision, CollisionHit, "morok.fco.win.collision.next");
     Value *CursorPtr =
         NB.CreateIntToPtr(Cursor, Ptr, "morok.fco.win.cursor.ptr");
     Value *NextCursor =
@@ -566,9 +592,14 @@ Function *windowsHashResolver(Module &M) {
     NB.CreateBr(Loop);
     Cursor->addIncoming(NextCursor, Next);
     Idx->addIncoming(NextIdx, Next);
+    Candidate->addIncoming(NextCandidate, Next);
+    Collision->addIncoming(NextCollision, Next);
 
-    IRBuilder<> FB(RetFound);
-    FB.CreateRet(FB.CreateIntToPtr(Resolved, Ptr, "morok.fco.win.resolved"));
+    IRBuilder<> DB(RetDone);
+    Value *Unique =
+        DB.CreateSelect(Collision, ConstantInt::get(IP, 0), Candidate,
+                        "morok.fco.win.unique");
+    DB.CreateRet(DB.CreateIntToPtr(Unique, Ptr, "morok.fco.win.resolved"));
 
     IRBuilder<> RB(RetNull);
     RB.CreateRet(ConstantPointerNull::get(Ptr));
