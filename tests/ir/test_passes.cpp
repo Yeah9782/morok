@@ -3753,6 +3753,54 @@ merge:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+// Regression for #30: a self-loop PHI in a latch whose first non-PHI is the
+// terminator.  edgeCopy() emits carrier bitcast/xor instructions that use the
+// original PHI *ahead* of the tangled replacement; those generated values must
+// be excluded from PHI-use replacement, or replaceUses() rewrites the PHI
+// operand to the later replacement, producing an invalid same-block
+// use-before-def that fails verification.  Covers the FP carrier path (the
+// untracked user is a bitcast) and the integer path (toCarrier returns the PHI
+// directly, so the untracked user is the edge-mix xor).
+TEST_CASE("phiTangleFunction keeps self-loop PHIs valid") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define double @fp_selfloop(double %a, i1 %c) {
+entry:
+  br label %loop
+loop:
+  %p = phi double [ %a, %entry ], [ %p, %loop ]
+  br i1 %c, label %loop, label %exit
+exit:
+  ret double %p
+}
+
+define i64 @int_selfloop(i64 %a, i1 %c) {
+entry:
+  br label %loop
+loop:
+  %p = phi i64 [ %a, %entry ], [ %p, %loop ]
+  br i1 %c, label %loop, label %exit
+exit:
+  ret i64 %p
+}
+)ir");
+    Function *FpF = M->getFunction("fp_selfloop");
+    Function *IntF = M->getFunction("int_selfloop");
+    REQUIRE(FpF);
+    REQUIRE(IntF);
+    REQUIRE_FALSE(verifyModule(*M, &errs())); // fixtures start valid
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(3001);
+    morok::ir::IRRandom rng(engine);
+    CHECK(morok::passes::phiTangleFunction(
+        *FpF, {/*probability=*/100, /*layers=*/2, /*max_phis=*/8}, rng));
+    CHECK(morok::passes::phiTangleFunction(
+        *IntF, {/*probability=*/100, /*layers=*/2, /*max_phis=*/8}, rng));
+
+    // Both self-loop tangles must leave well-formed, dominating SSA.
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("phiTangleFunction skips unsupported pointer phis") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(

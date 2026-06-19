@@ -91,16 +91,30 @@ Value *fromCarrier(IRBuilder<NoFolder> &B, Value *V, Type *ResultTy,
 }
 
 Value *edgeCopy(PHINode &PN, unsigned incoming, IntegerType *CarrierTy,
-                ir::IRRandom &rng) {
+                ir::IRRandom &rng, std::vector<Instruction *> &generated) {
     BasicBlock *Pred = PN.getIncomingBlock(incoming);
     Instruction *Term = Pred->getTerminator();
     IRBuilder<NoFolder> B(Term);
     Value *V = PN.getIncomingValue(incoming);
+    // For a self-loop edge the incoming value IS the PHI, so the carrier
+    // instructions below use the original PHI.  Record every instruction we
+    // create here in `generated` so replaceUses() never rewrites that PHI
+    // operand to the later tangled replacement — which, when this edge copy is
+    // emitted ahead of the replacement (a latch whose first non-PHI is the
+    // terminator), would be an invalid use-before-def.  toCarrier/fromCarrier
+    // can return their input unchanged, so only track newly created values.
     Value *Bits = toCarrier(B, V, CarrierTy);
+    if (Bits != V)
+        trackGenerated(Bits, generated);
     Value *K = rng.constInt(CarrierTy);
     Value *Mixed = B.CreateXor(Bits, K, "morok.phi.edge.mix");
     Value *Copy = B.CreateXor(Mixed, K, "morok.phi.edge.copy.bits");
-    return fromCarrier(B, Copy, PN.getType(), "morok.phi.edge.copy");
+    trackGenerated(Mixed, generated);
+    trackGenerated(Copy, generated);
+    Value *Result = fromCarrier(B, Copy, PN.getType(), "morok.phi.edge.copy");
+    if (Result != Copy)
+        trackGenerated(Result, generated);
+    return Result;
 }
 
 PHINode *cloneDirectPhi(PHINode &PN) {
@@ -111,7 +125,8 @@ PHINode *cloneDirectPhi(PHINode &PN) {
     return Copy;
 }
 
-PHINode *cloneEdgePhi(PHINode &PN, IntegerType *CarrierTy, ir::IRRandom &rng) {
+PHINode *cloneEdgePhi(PHINode &PN, IntegerType *CarrierTy, ir::IRRandom &rng,
+                      std::vector<Instruction *> &generated) {
     auto *Copy = PHINode::Create(PN.getType(), PN.getNumIncomingValues(),
                                  "morok.phi.edge", &PN);
     // A predecessor can appear at more than one incoming index (callbr/asm-goto
@@ -123,9 +138,10 @@ PHINode *cloneEdgePhi(PHINode &PN, IntegerType *CarrierTy, ir::IRRandom &rng) {
         BasicBlock *Pred = PN.getIncomingBlock(i);
         auto It = PerBlock.find(Pred);
         if (It == PerBlock.end())
-            It =
-                PerBlock.try_emplace(Pred, edgeCopy(PN, i, CarrierTy, rng))
-                    .first;
+            It = PerBlock
+                     .try_emplace(Pred,
+                                  edgeCopy(PN, i, CarrierTy, rng, generated))
+                     .first;
         Copy->addIncoming(It->second, Pred);
     }
     return Copy;
@@ -149,7 +165,7 @@ Value *buildTangledValue(PHINode &PN, const PhiTangleParams &params,
     Value *Acc = &PN;
     const std::uint32_t layers = std::max<std::uint32_t>(params.layers, 1);
     for (std::uint32_t i = 0; i < layers; ++i) {
-        PHINode *Edge = cloneEdgePhi(PN, CarrierTy, rng);
+        PHINode *Edge = cloneEdgePhi(PN, CarrierTy, rng, generated);
         PHINode *Direct = cloneDirectPhi(PN);
         generated.push_back(Edge);
         generated.push_back(Direct);
