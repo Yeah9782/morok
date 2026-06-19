@@ -56,6 +56,37 @@ constexpr std::uint64_t kUnrollThreshold = 64; // ≤ this ⇒ unrolled, else lo
 constexpr std::uint64_t kMaxStackStringBytes = 4096;
 constexpr int kCtorDecryptPriority = 0;
 
+bool hasSpecialSectionSemantics(StringRef Section) {
+    if (Section.empty())
+        return false;
+    if (Section == "llvm.metadata")
+        return true;
+
+    // Explicit section names can carry ABI/runtime permissions and parser
+    // semantics that are not visible from LLVM IR mutability alone.  Keep these
+    // sections literal: encrypting them would put ciphertext where the loader,
+    // Obj-C runtime, unwinder, or linker expects structured plaintext, and lazy
+    // in-place decryptors may fault on read-only mappings.
+    if (Section.starts_with("__TEXT,") ||
+        Section.starts_with("__DATA_CONST,") ||
+        Section.contains("__cstring") || Section.contains("cstring_literals") ||
+        Section.contains("__objc_"))
+        return true;
+
+    if (Section.starts_with(".rodata") || Section.starts_with(".rdata") ||
+        Section.starts_with(".text") || Section.starts_with(".eh_frame") ||
+        Section.starts_with(".gcc_except_table") ||
+        Section.starts_with(".debug") || Section.starts_with(".comment") ||
+        Section.starts_with(".note") || Section.starts_with(".pdata") ||
+        Section.starts_with(".xdata") || Section.starts_with(".CRT") ||
+        Section.starts_with(".init_array") ||
+        Section.starts_with(".fini_array") || Section.starts_with(".ctors") ||
+        Section.starts_with(".dtors") || Section.starts_with(".llvm."))
+        return true;
+
+    return false;
+}
+
 bool eligible(const GlobalVariable &gv) {
     if (!gv.hasInitializer() || !gv.hasLocalLinkage())
         return false;
@@ -69,10 +100,9 @@ bool eligible(const GlobalVariable &gv) {
     // by cheap triage such as `strings` while real user strings are encrypted.
     if (gv.getName().starts_with("morok."))
         return false;
-    // LLVM metadata is not program string data.  Other section-pinned user
-    // strings are still encrypted, but they stay same-sized so their explicit
-    // section identity is not lost through global replacement.
-    if (gv.getSection() == "llvm.metadata")
+    // Ordinary custom-section user strings are still encrypted, but sections
+    // with loader/runtime/read-only semantics are left untouched.
+    if (hasSpecialSectionSemantics(gv.getSection()))
         return false;
     const auto *cda = dyn_cast<ConstantDataArray>(gv.getInitializer());
     return cda && cda->getElementType()->isIntegerTy(8) &&

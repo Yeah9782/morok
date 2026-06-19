@@ -12807,14 +12807,17 @@ TEST_CASE("cloakSeed rejects a malformed pre-existing seed global") {
 // with a larger one.  It dropped the original address space (so RAUW across a
 // mismatched pointer type is invalid IR), forced Align(1) (UB if loads relied
 // on a higher alignment), and dropped any pinned section.  The replacement must
-// keep the address space and alignment, and section-pinned user strings must be
-// encrypted in place without losing their section identity.
+// keep the address space and alignment. Ordinary custom-section user strings
+// may still be encrypted in place without losing their section identity, but
+// loader/runtime/read-only special sections must be left literal.
 TEST_CASE("stringEncryptModule preserves address space alignment and section") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
 @s_as1 = private addrspace(1) constant [6 x i8] c"hello\00"
 @s_align = private constant [6 x i8] c"world\00", align 8
 @s_sec = private constant [4 x i8] c"sec\00", section "mysec"
+@s_cstring = private constant [8 x i8] c"literal\00", section "__TEXT,__cstring,cstring_literals"
+@s_rodata = private constant [7 x i8] c"rodata\00", section ".rodata.str1.1"
 )ir");
     REQUIRE(M);
     auto engine = morok::core::Xoshiro256pp::fromSeed(3901);
@@ -12841,6 +12844,25 @@ TEST_CASE("stringEncryptModule preserves address space alignment and section") {
     REQUIRE(SecCDA);
     CHECK_FALSE(SecCDA->getRawDataValues().starts_with("sec"));
     CHECK_FALSE(Sec->isConstant());
+
+    // Special read-only/runtime sections stay literal and immutable; encrypting
+    // them would put ciphertext where the loader/runtime expects strings or
+    // would make the decryptor store into a read-only mapping.
+    GlobalVariable *CString = M->getGlobalVariable("s_cstring", true);
+    REQUIRE(CString);
+    CHECK(CString->getSection() == "__TEXT,__cstring,cstring_literals");
+    auto *CStringCDA = dyn_cast<ConstantDataArray>(CString->getInitializer());
+    REQUIRE(CStringCDA);
+    CHECK(CStringCDA->getRawDataValues().starts_with("literal"));
+    CHECK(CString->isConstant());
+
+    GlobalVariable *Rodata = M->getGlobalVariable("s_rodata", true);
+    REQUIRE(Rodata);
+    CHECK(Rodata->getSection() == ".rodata.str1.1");
+    auto *RodataCDA = dyn_cast<ConstantDataArray>(Rodata->getInitializer());
+    REQUIRE(RodataCDA);
+    CHECK(RodataCDA->getRawDataValues().starts_with("rodata"));
+    CHECK(Rodata->isConstant());
 
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
