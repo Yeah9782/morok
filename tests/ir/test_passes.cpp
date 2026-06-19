@@ -7234,6 +7234,68 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+// Regression for #26: odd-width integer constants whose storage byte count is
+// not a power of two (i24 -> 3 bytes, i40 -> 5 bytes) must not be passed to
+// llvm::Align, which requires a power-of-two value and otherwise asserts
+// ("Alignment is not a power of 2") on an assertions-enabled LLVM, aborting the
+// compiler/plugin.  createMask now rounds the mask alignment up to a valid
+// power of two.  i12 (-> 2 bytes) above is already a valid Align, so it never
+// exercised this path.
+TEST_CASE(
+    "selfChecksumConstantsFunction handles non-power-of-two width constants") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i24 @selfcheck_i24() {
+entry:
+  ret i24 100
+}
+
+define i40 @selfcheck_i40() {
+entry:
+  ret i40 200
+}
+)ir");
+    Function *I24F = M->getFunction("selfcheck_i24");
+    Function *I40F = M->getFunction("selfcheck_i40");
+    REQUIRE(I24F);
+    REQUIRE(I40F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(2417);
+    morok::ir::IRRandom rng(engine);
+
+    // Before the fix these abort the process via Align(3)/Align(5) on an
+    // assertions-enabled LLVM; the pass must instead complete cleanly.
+    CHECK(morok::passes::selfChecksumConstantsFunction(
+        *I24F, {/*probability=*/100, /*max_constants=*/1, /*region_bytes=*/32},
+        rng));
+    CHECK(morok::passes::selfChecksumConstantsFunction(
+        *I40F, {/*probability=*/100, /*max_constants=*/1, /*region_bytes=*/32},
+        rng));
+
+    bool sawI24Mask = false;
+    bool sawI40Mask = false;
+    for (GlobalVariable &GV : M->globals()) {
+        if (!GV.getName().starts_with("morok.sc.mask"))
+            continue;
+        auto *MaskTy = cast<IntegerType>(GV.getValueType());
+        const unsigned Bytes = (MaskTy->getBitWidth() + 7u) / 8u;
+        const std::uint64_t A = GV.getAlign().valueOrOne().value();
+        // Must be a valid (power-of-two) alignment that is not smaller than the
+        // storage size.  The old `Align(Bytes)` either asserts (assertions
+        // build) or silently floors a non-power-of-two byte count down to a
+        // too-small power of two (i24 -> 3 floors to 2; i40 -> 5 floors to 4);
+        // either way this check fails on the buggy path.
+        CHECK(llvm::isPowerOf2_64(A));
+        CHECK(A >= Bytes);
+        sawI24Mask |= MaskTy->isIntegerTy(24);
+        sawI40Mask |= MaskTy->isIntegerTy(40);
+    }
+    CHECK(sawI24Mask);
+    CHECK(sawI40Mask);
+    CHECK(M->getFunction("morok.sc.diff.selfcheck_i24") != nullptr);
+    CHECK(M->getFunction("morok.sc.diff.selfcheck_i40") != nullptr);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("selfChecksumConstantsFunction fuses integer select literals") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(

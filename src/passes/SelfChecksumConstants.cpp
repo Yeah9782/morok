@@ -28,6 +28,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/NoFolder.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/ModRef.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
@@ -583,12 +584,19 @@ Runtime createRuntime(Function &F, const SelfChecksumParams &Params,
 
 GlobalVariable *createMask(Module &M, Function &F, IntegerType *Ty,
                            std::uint64_t Mask) {
+    // The storage byte count of an odd-width integer (e.g. i17 -> 3, i40 -> 5)
+    // is not a valid llvm::Align, which requires a nonzero power of two and
+    // otherwise asserts ("Alignment is not a power of 2") in assertions-enabled
+    // builds.  This private mask is a plain XOR pad with no real alignment
+    // requirement, so round the byte count up to the next power of two; natural
+    // widths (i8/i16/i32/i64) are unchanged.
     const unsigned Bytes = (Ty->getBitWidth() + 7u) / 8u;
+    const std::uint64_t MaskAlign = llvm::PowerOf2Ceil(Bytes);
     auto *GV = new GlobalVariable(
         M, Ty, /*isConstant=*/false, GlobalValue::PrivateLinkage,
         ConstantInt::get(Ty, Mask),
         (Twine("morok.sc.mask.") + suffixFor(F)).str());
-    GV->setAlignment(Align(Bytes));
+    GV->setAlignment(Align(MaskAlign));
     return GV;
 }
 
