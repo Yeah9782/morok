@@ -184,8 +184,18 @@ bool defineFinish(Module &M, GlobalVariable *Accum, GlobalVariable *Seen,
         B.CreateXor(Acc, Domain, "morok.proof.finish.domain");
     Material = mix64(B, Material, 0x9B1A3B5D7F0E24C6ULL,
                      "morok.proof.finish.mix");
+    Material = B.CreateOr(Material, ConstantInt::get(I64, 1),
+                          "morok.proof.finish.material.nonzero");
+    Value *Missing = B.CreateXor(Acc, Domain,
+                                 "morok.proof.finish.missing.domain");
+    Missing = B.CreateXor(Missing, ConstantInt::get(I64, 0xD6E8FEB86659FD93ULL),
+                          "morok.proof.finish.missing.tag");
+    Missing = mix64(B, Missing, 0xE7037ED1A0B428DBULL,
+                    "morok.proof.finish.missing");
+    Missing = B.CreateOr(Missing, ConstantInt::get(I64, 1),
+                         "morok.proof.finish.missing.nonzero");
     Value *Contribution =
-        B.CreateSelect(SeenLoad, Material, ConstantInt::get(I64, 0),
+        B.CreateSelect(SeenLoad, Material, Missing,
                        "morok.proof.finish.contribution");
     if (BindToRuntimeSeal)
         runtime_seal::foldWord(B, runtime_seal::kExternalProofChannel,

@@ -1596,29 +1596,36 @@ Value *emitStreamKey(Builder &B, Value *Offset, const Encoding &Enc) {
     Value *X =
         B.CreateMul(Offset, ConstantInt::get(I32, Enc.mul), "morok.vm.key.mul");
     X = B.CreateAdd(X, ConstantInt::get(I32, Enc.add), "morok.vm.key.add");
-    // L1: fold a 0-on-clean delta from the verdict seal into the keystream.  On
-    // a clean run seal==S0 so X is unchanged and the decode matches the
-    // compile-time encode; under a tripped detector (injection/tamper) every
-    // decoded byte — opcode, operand, and immediate (all route through
-    // emitDecodeByte) — is wrong and vm.exec yields garbage.  Closes the
-    // vm.exec gap left open by M4.
-    if (GlobalVariable *Seal =
-            runtime_seal::findChannel(*B.GetInsertBlock()->getModule(),
-                                      runtime_seal::kAntiDebugChannel)) {
+    auto foldSealChannel = [&](StringRef Channel, std::uint64_t DomainTag,
+                               StringRef DeltaName, StringRef KdfName,
+                               StringRef FoldName, StringRef KeyName) {
+        GlobalVariable *Seal = runtime_seal::findChannel(
+            *B.GetInsertBlock()->getModule(), Channel);
+        if (!Seal)
+            return;
         auto *I64 = B.getInt64Ty();
         Value *D = runtime_seal::emitDelta(
-            B, Seal, runtime_seal::initialValue(Seal), "morok.vm.seal");
+            B, Seal, runtime_seal::initialValue(Seal), DeltaName);
         const std::uint64_t Domain =
             (static_cast<std::uint64_t>(Enc.mul) << 32) ^
             (static_cast<std::uint64_t>(Enc.add) << 16) ^
-            static_cast<std::uint64_t>(Enc.xork) ^ 0x6D6F726F6B766D31ULL;
-        Value *K64 = runtime_seal::emitKdf64(B, D, Domain, "morok.vm.seal.kdf");
+            static_cast<std::uint64_t>(Enc.xork) ^ DomainTag;
+        Value *K64 = runtime_seal::emitKdf64(B, D, Domain, KdfName);
         Value *D32 = B.CreateXor(
             B.CreateTrunc(K64, I32),
             B.CreateTrunc(B.CreateLShr(K64, ConstantInt::get(I64, 32)), I32),
-            "morok.vm.seal.fold");
-        X = B.CreateAdd(X, D32, "morok.vm.key.seal");
-    }
+            FoldName);
+        X = B.CreateAdd(X, D32, KeyName);
+    };
+    // Fold 0-on-clean seal deltas into the keystream. On a clean run seal==S0,
+    // so X is unchanged and bytecode decodes normally; any dirty channel
+    // corrupts every decoded opcode, operand, and immediate.
+    foldSealChannel(runtime_seal::kAntiDebugChannel, 0x6D6F726F6B766D31ULL,
+                    "morok.vm.seal", "morok.vm.seal.kdf", "morok.vm.seal.fold",
+                    "morok.vm.key.seal");
+    foldSealChannel(runtime_seal::kExternalProofChannel, 0x3C3276BA47C1A99DULL,
+                    "morok.vm.proof.seal", "morok.vm.proof.seal.kdf",
+                    "morok.vm.proof.seal.fold", "morok.vm.key.external_proof");
     X = B.CreateXor(X, B.CreateLShr(X, ConstantInt::get(I32, 7)),
                     "morok.vm.key.fold7");
     X = B.CreateXor(X, B.CreateLShr(X, ConstantInt::get(I32, 15)),

@@ -46,6 +46,7 @@
 #include "morok/passes/PerBuildPolymorphism.hpp"
 #include "morok/passes/PhiTangling.hpp"
 #include "morok/passes/PointerLaundering.hpp"
+#include "morok/passes/RuntimeSeal.hpp"
 #include "morok/passes/SealedBlob.hpp"
 #include "morok/passes/SelfChecksumConstants.hpp"
 #include "morok/passes/ShamirShare.hpp"
@@ -7635,6 +7636,38 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("virtualizeModule keys VM stream on external proof seal") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @vm_proof(i32 %a, i32 %b) {
+entry:
+  %x = add i32 %a, %b
+  %y = xor i32 %x, 324508639
+  ret i32 %y
+}
+)ir");
+    Function *F = M->getFunction("vm_proof");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(1774);
+    morok::ir::IRRandom rng(engine);
+    morok::passes::runtime_seal::getChannel(
+        *M, morok::passes::runtime_seal::kExternalProofChannel, rng);
+
+    CHECK(morok::passes::virtualizeModule(
+        *M,
+        {/*probability=*/100, /*max_functions=*/1,
+         /*max_instructions=*/64, /*max_registers=*/96},
+        rng));
+
+    Function *Helper = M->getFunction("morok.vm.vm_proof.exec");
+    REQUIRE(Helper);
+    CHECK(M->getGlobalVariable("morok.seal.root.external_proof", true) !=
+          nullptr);
+    CHECK(countNamedInstructions(*Helper, "morok.vm.proof.seal.kdf.key") >= 1u);
+    CHECK(countNamedInstructions(*Helper, "morok.vm.key.external_proof") >= 1u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("virtualizeModule lifts multi-block branching control flow") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
@@ -8804,8 +8837,22 @@ entry:
     CHECK(feedLoadsProofByte);
     CHECK(countNamedInstructions(*Finish, "morok.proof.finish.contribution") ==
           1u);
+    CHECK(countNamedInstructions(*Finish,
+                                 "morok.proof.finish.missing.nonzero") == 1u);
     CHECK(countNamedInstructions(*Finish, "morok.proof.finish.seal.next") ==
           1u);
+
+    bool missingProofPoisonsSeal = false;
+    for (Instruction &I : instructions(*Finish)) {
+        auto *SI = dyn_cast<SelectInst>(&I);
+        if (!SI || SI->getName() != "morok.proof.finish.contribution")
+            continue;
+        if (auto *CI = dyn_cast<ConstantInt>(SI->getFalseValue()))
+            missingProofPoisonsSeal |= !CI->isZero();
+        else
+            missingProofPoisonsSeal = true;
+    }
+    CHECK(missingProofPoisonsSeal);
 
     bool finishStoresSeal = false;
     for (Instruction &I : instructions(*Finish))
@@ -8989,6 +9036,8 @@ entry:
     addAntiAnalysisPoison(*M, ctx);
     auto engine = morok::core::Xoshiro256pp::fromSeed(181);
     morok::ir::IRRandom rng(engine);
+    morok::passes::runtime_seal::getChannel(
+        *M, morok::passes::runtime_seal::kExternalProofChannel, rng);
 
     CHECK(morok::passes::selfChecksumConstantsFunction(
         *F, {/*probability=*/100, /*max_constants=*/8, /*region_bytes=*/32},
@@ -9000,6 +9049,8 @@ entry:
     CHECK(countGlobals(*M, "morok.sc.mask") == 2u);
     CHECK(countGlobals(*M, "morok.postlink.sc") == 1u);
     CHECK(M->getGlobalVariable("morok.seal.root.anti_debug", true) != nullptr);
+    CHECK(M->getGlobalVariable("morok.seal.root.external_proof", true) !=
+          nullptr);
 
     GlobalVariable *Region = nullptr;
     GlobalVariable *Expected = nullptr;
@@ -9059,6 +9110,8 @@ entry:
     bool hasCryptoDiff = false;
     bool hasRuntimeSealKdf = false;
     bool hasRuntimeSealDiff = false;
+    bool hasExternalProofKdf = false;
+    bool hasExternalProofDiff = false;
     bool hasAntiAnalysisPoisonLoad = false;
     bool hasAntiAnalysisDiff = false;
     for (Instruction &I : instructions(*Diff)) {
@@ -9068,6 +9121,10 @@ entry:
             I.getName().starts_with("morok.sc.runtime_seal.kdf.key");
         hasRuntimeSealDiff |=
             I.getName().starts_with("morok.sc.runtime_seal.diff");
+        hasExternalProofKdf |=
+            I.getName().starts_with("morok.sc.external_proof.kdf.key");
+        hasExternalProofDiff |=
+            I.getName().starts_with("morok.sc.external_proof.diff");
         hasAntiAnalysisDiff |=
             I.getName().starts_with("morok.sc.antianalysis.diff");
         if (auto *CI = dyn_cast<CallInst>(&I))
@@ -9109,6 +9166,8 @@ entry:
     CHECK(hasCryptoDiff);
     CHECK(hasRuntimeSealKdf);
     CHECK(hasRuntimeSealDiff);
+    CHECK(hasExternalProofKdf);
+    CHECK(hasExternalProofDiff);
     CHECK_FALSE(hasTrap);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
