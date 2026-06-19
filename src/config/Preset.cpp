@@ -684,8 +684,10 @@ PassConfig makeHigh() {
     c.csm.enabled = true;
     c.csm.generator = CsmGenerator::TFunction;
     c.csm.tf_const = 0;
-    c.csm.nested_dispatch = false;
-    c.csm.warmup = 128;
+    // warmup / nested_dispatch are reserved no-ops (the telescoping dispatch
+    // pins the state to block IDs, leaving no free-running chaos state to warm
+    // up and no second dispatch level); presets must not imply variation the
+    // pass cannot deliver — see ChaosStateMachine.hpp.
     c.flatten.enabled = false;
 
     c.indir_branch.enabled = true;
@@ -920,8 +922,8 @@ PassConfig makeMax() {
     c.csm.enabled = true;
     c.csm.generator = CsmGenerator::TFunction;
     c.csm.tf_const = 0;
-    c.csm.nested_dispatch = true;
-    c.csm.warmup = 256;
+    // warmup / nested_dispatch are reserved no-ops; do not vary them per preset
+    // (see ChaosStateMachine.hpp and makeHigh()).
 
     c.flatten.enabled = true;
     c.indir_branch.enabled = true;

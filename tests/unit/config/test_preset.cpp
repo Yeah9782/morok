@@ -31,6 +31,19 @@ TEST_CASE("preset 'none' leaves every field unset") {
     CHECK_FALSE(c.csm.enabled.has_value());
 }
 
+// Regression for #23: chaos_state_machine.warmup / nested_dispatch are reserved
+// no-ops — the telescoping dispatch pins the state to block IDs, so there is no
+// chaos state to warm up and no second dispatch level.  The pass ignores them,
+// so no preset may advertise per-level variation the pass cannot deliver (the
+// presets previously set warmup=128/256 and nested_dispatch=false/true).
+TEST_CASE("presets do not vary reserved chaos_state_machine knobs") {
+    for (Preset p : {Preset::Low, Preset::Mid, Preset::High, Preset::Max}) {
+        const PassConfig c = presetConfig(p);
+        CHECK_FALSE(c.csm.warmup.has_value());
+        CHECK_FALSE(c.csm.nested_dispatch.has_value());
+    }
+}
+
 TEST_CASE("low preset matches the documented table") {
     const PassConfig c = presetConfig(Preset::Low);
     CHECK(c.bcf.probability == 30u);

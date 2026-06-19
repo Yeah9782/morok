@@ -32,9 +32,14 @@ enum class CsmGenerator {
 
 struct CsmParams {
     CsmGenerator generator = CsmGenerator::Logistic;
-    std::uint64_t tf_const = 0;      ///< 0/invalid => draw valid C per function
-    std::uint32_t warmup = 64;       ///< retained for logistic parity
-    bool nested_dispatch = false;    ///< reserved scheduler/config knob
+    std::uint64_t tf_const = 0; ///< 0/invalid => draw valid C per function
+    // Reserved, intentional no-ops.  The telescoping dispatch pins the state
+    // variable to the block IDs (next = step(cur) XOR correction == targetId),
+    // so there is no free-running chaos state to advance and no second dispatch
+    // level to enable.  Parsed for forward-compatibility but they do not affect
+    // the emitted IR, so presets must not vary them (see Preset.cpp).
+    std::uint32_t warmup = 64;
+    bool nested_dispatch = false;
 };
 
 /// Apply the chaos state machine to `F`.  Returns true if it was flattened.
