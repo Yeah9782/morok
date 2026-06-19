@@ -9351,10 +9351,16 @@ no:
     std::size_t volatileLoads = 0;
     std::size_t volatileStores = 0;
     std::size_t recordBlocks = 0;
+    std::size_t guardLatentStores = 0;
+    std::size_t recordLatentStores = 0;
+    std::size_t latentRecordSelects = 0;
     std::size_t delayedFires = 0;
     std::size_t delayedBranchKeys = 0;
     std::size_t delayedReturnKeys = 0;
     std::size_t delayedSwitchKeys = 0;
+    std::size_t bodyBranchPoisons = 0;
+    std::size_t bodyReturnPoisons = 0;
+    std::size_t bodySwitchPoisons = 0;
     std::size_t watchdogCryptoLoads = 0;
     std::size_t watchdogCryptoMixes = 0;
     std::size_t edgeMixes = 0;
@@ -9371,6 +9377,8 @@ no:
                 ++edgeMixes;
             if (I.getName().starts_with("morok.trace.delay.fire"))
                 ++delayedFires;
+            if (I.getName().starts_with("morok.trace.record.latent"))
+                ++latentRecordSelects;
             if (I.getName().starts_with("morok.trace.crypto.latent"))
                 ++watchdogCryptoMixes;
             if (I.getName().starts_with("morok.trace.value.bits"))
@@ -9382,22 +9390,45 @@ no:
                         "morok.watchdog.crypto"))
                     ++watchdogCryptoLoads;
             }
-            if (auto *SI = dyn_cast<StoreInst>(&I))
+            if (auto *SI = dyn_cast<StoreInst>(&I)) {
                 volatileStores += SI->isVolatile() ? 1u : 0u;
-            if (auto *BI = dyn_cast<BranchInst>(&I))
+                if (SI->isVolatile() &&
+                    SI->getPointerOperand()->getName().starts_with(
+                        "morok.trace.latent")) {
+                    if (BB.getName().starts_with("morok.trace.record"))
+                        ++recordLatentStores;
+                    else
+                        ++guardLatentStores;
+                }
+            }
+            if (auto *BI = dyn_cast<BranchInst>(&I)) {
                 if (BI->isConditional() &&
                     BI->getCondition()->getName().starts_with(
                         "morok.trace.delay.branch.cond"))
                     ++delayedBranchKeys;
-            if (auto *RI = dyn_cast<ReturnInst>(&I))
+                if (BI->isConditional() &&
+                    BI->getCondition()->getName().starts_with(
+                        "morok.trace.branch.cond"))
+                    ++bodyBranchPoisons;
+            }
+            if (auto *RI = dyn_cast<ReturnInst>(&I)) {
                 if (RI->getReturnValue() &&
                     RI->getReturnValue()->getName().starts_with(
                         "morok.trace.delay.ret"))
                     ++delayedReturnKeys;
-            if (auto *SW = dyn_cast<SwitchInst>(&I))
+                if (RI->getReturnValue() &&
+                    RI->getReturnValue()->getName().starts_with(
+                        "morok.trace.ret"))
+                    ++bodyReturnPoisons;
+            }
+            if (auto *SW = dyn_cast<SwitchInst>(&I)) {
                 if (SW->getCondition()->getName().starts_with(
                         "morok.trace.delay.switch.cond"))
                     ++delayedSwitchKeys;
+                if (SW->getCondition()->getName().starts_with(
+                        "morok.trace.switch.cond"))
+                    ++bodySwitchPoisons;
+            }
         }
     }
     CHECK(guards >= 4u);
@@ -9405,8 +9436,12 @@ no:
     CHECK(volatileLoads >= 4u);
     CHECK(volatileStores >= 4u);
     CHECK(recordBlocks >= 4u);
+    CHECK(guardLatentStores >= guards);
+    CHECK(recordLatentStores == 0u);
+    CHECK(latentRecordSelects >= guards);
     CHECK(delayedFires >= 1u);
     CHECK(delayedBranchKeys + delayedReturnKeys + delayedSwitchKeys >= 1u);
+    CHECK(bodyBranchPoisons + bodyReturnPoisons + bodySwitchPoisons >= 1u);
     CHECK(watchdogCryptoLoads >= 1u);
     CHECK(watchdogCryptoMixes >= 1u);
     CHECK(edgeMixes >= 3u);

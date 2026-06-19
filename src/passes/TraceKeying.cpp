@@ -257,6 +257,68 @@ Value *valueTraceTag(IRBuilder<NoFolder> &B, Instruction &Term, Value *EdgeTag,
     return Tag;
 }
 
+Value *asReturnWidth(IRBuilder<NoFolder> &B, Value *Diff, Type *Ty) {
+    auto *IT = dyn_cast<IntegerType>(Ty);
+    if (!IT)
+        return nullptr;
+    const unsigned Bits = IT->getBitWidth();
+    if (Bits > 64)
+        return nullptr;
+    if (Bits == 64)
+        return Diff;
+    if (Bits < 64)
+        return B.CreateTrunc(Diff, IT, "morok.trace.ret.key");
+    return nullptr;
+}
+
+Value *asConditionKey(IRBuilder<NoFolder> &B, Value *Diff) {
+    return B.CreateICmpNE(Diff, ConstantInt::get(B.getInt64Ty(), 0),
+                          "morok.trace.bad");
+}
+
+void poisonTerminator(BasicBlock *Body, Value *Diff) {
+    Instruction *Term = Body->getTerminator();
+    IRBuilder<NoFolder> B(Term);
+
+    if (auto *RI = dyn_cast<ReturnInst>(Term)) {
+        if (ir::isMustTailReturn(*RI))
+            return;
+        Value *Ret = RI->getReturnValue();
+        if (!Ret)
+            return;
+        Value *Key = asReturnWidth(B, Diff, Ret->getType());
+        if (!Key)
+            return;
+        Value *Poisoned = B.CreateXor(Ret, Key, "morok.trace.ret");
+        RI->setOperand(0, Poisoned);
+        return;
+    }
+
+    if (auto *BI = dyn_cast<BranchInst>(Term)) {
+        if (!BI->isConditional())
+            return;
+        Value *Bad = asConditionKey(B, Diff);
+        Value *Cond =
+            B.CreateXor(BI->getCondition(), Bad, "morok.trace.branch.cond");
+        BI->setCondition(Cond);
+        return;
+    }
+
+    if (auto *SI = dyn_cast<SwitchInst>(Term)) {
+        auto *IT = dyn_cast<IntegerType>(SI->getCondition()->getType());
+        if (!IT || IT->getBitWidth() > 64)
+            return;
+        Value *Key = nullptr;
+        if (IT->getBitWidth() == 64)
+            Key = Diff;
+        else
+            Key = B.CreateTrunc(Diff, IT, "morok.trace.switch.key");
+        Value *Cond =
+            B.CreateXor(SI->getCondition(), Key, "morok.trace.switch.cond");
+        SI->setCondition(Cond);
+    }
+}
+
 void relaxMemoryAttrs(Function &F) {
     F.setMemoryEffects(MemoryEffects::unknown());
     F.removeFnAttr(Attribute::NoSync);
@@ -288,19 +350,21 @@ void invalidateCallerEffects(Function &F) {
     }
 }
 
-void recordTraceMismatch(BasicBlock *Record, BasicBlock *Body,
-                         GlobalVariable *Latent, Value *Diff,
-                         ir::IRRandom &Rng) {
-    IRBuilder<NoFolder> B(Record);
+void recordTraceState(IRBuilder<NoFolder> &B, GlobalVariable *Latent,
+                      Value *Diff, ir::IRRandom &Rng) {
     auto *I64 = B.getInt64Ty();
     auto *Cur = B.CreateLoad(I64, Latent, "morok.trace.latent.load");
     Cur->setVolatile(true);
     Cur->setAlignment(Align(8));
     Value *Mixed = mix64(B, Cur, Diff, Rng.next(), "morok.trace.record.mix");
-    auto *Store = B.CreateStore(Mixed, Latent);
+    Value *Changed =
+        B.CreateICmpNE(Diff, ConstantInt::get(I64, 0),
+                       "morok.trace.record.changed");
+    Value *Next =
+        B.CreateSelect(Changed, Mixed, Cur, "morok.trace.record.latent");
+    auto *Store = B.CreateStore(Next, Latent);
     Store->setVolatile(true);
     Store->setAlignment(Align(8));
-    B.CreateBr(Body);
 }
 
 GuardedBlock splitWithGuard(BasicBlock *BB, AllocaInst *State,
@@ -324,12 +388,15 @@ GuardedBlock splitWithGuard(BasicBlock *BB, AllocaInst *State,
     Loaded->setVolatile(true);
     Loaded->setAlignment(Align(8));
     Value *Diff = GB.CreateXor(Loaded, Expected, "morok.trace.diff");
+    recordTraceState(GB, Latent, Diff, Rng);
     Value *Guard =
         GB.CreateICmpEQ(Diff, ConstantInt::get(I64, 0), "morok.trace.guard");
     GB.CreateCondBr(Guard, Body, Record);
     OldTerm->eraseFromParent();
 
-    recordTraceMismatch(Record, Body, Latent, Diff, Rng);
+    IRBuilder<NoFolder> RB(Record);
+    RB.CreateBr(Body);
+    poisonTerminator(Body, Diff);
     return {BB, Body, Record, Expected, Diff};
 }
 
