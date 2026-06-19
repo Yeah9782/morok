@@ -23,6 +23,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/NoFolder.h"
+#include "llvm/Transforms/Utils/ModuleUtils.h"
 
 #include <algorithm>
 #include <array>
@@ -397,6 +398,17 @@ Function *createEnsureFunction(Module &M, GlobalVariable *Table,
 
     IRBuilder<> XB(Exit);
     XB.CreateRetVoid();
+
+    // Decode the table once, at static-init time, by running this helper as a
+    // global constructor.  Constructors run single-threaded before main (and
+    // before any user thread can exist), so the in-place XOR decode completes
+    // race-free; by the time multiple threads can call the function-body ensure
+    // hooks, Ready is already set and they all short-circuit.  Without this, two
+    // threads reaching a freshly-transformed function could both observe
+    // Ready=false and concurrently XOR the same cells (volatile is not
+    // synchronization), leaving the table double-/partially-decoded and
+    // corrupting wide i9..i16 authorization/bounds/integrity decisions.
+    appendToGlobalCtors(M, Fn, /*Priority=*/65535);
     return Fn;
 }
 

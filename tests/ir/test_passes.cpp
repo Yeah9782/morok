@@ -5637,6 +5637,38 @@ TEST_CASE("tableArithmeticFunction caps selected table count") {
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+// Regression for #32: the lazy table decoder gated its one-time in-place XOR
+// decode on a volatile (non-atomic) flag, so two threads entering a freshly
+// transformed function could both observe ready=false and concurrently decode
+// the same cells (volatile is not synchronization), corrupting wide i9..i16
+// authorization/bounds/integrity decisions.  The ensure helper now runs as a
+// global constructor: static init is single-threaded and completes before any
+// user thread exists, so the decode is race-free and runtime calls short-circuit.
+TEST_CASE("tableArithmeticFunction decodes tables in a global constructor") {
+    LLVMContext ctx;
+    auto M = std::make_unique<Module>("table-ctor", ctx);
+    Function *F = makeI8OpChain(*M, 16, "bytes");
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(3201);
+    morok::ir::IRRandom rng(engine);
+    CHECK(morok::passes::tableArithmeticFunction(
+        *F, {/*probability=*/100, /*max_tables=*/8}, rng));
+
+    Function *Ensure = nullptr;
+    for (Function &G : *M)
+        if (G.getName().starts_with("morok.tablearith.ensure"))
+            Ensure = &G;
+    REQUIRE(Ensure);
+
+    // The decode helper must be registered as a global constructor (so it runs
+    // single-threaded at static init), not left to a racy lazy runtime path.
+    GlobalVariable *Ctors = M->getGlobalVariable("llvm.global_ctors");
+    REQUIRE(Ctors);
+    REQUIRE(Ctors->hasInitializer());
+    CHECK(constantReferencesGlobal(Ctors->getInitializer(), Ensure));
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE(
     "dataFlowIntegrityFunction derives table values from integrity hash") {
     LLVMContext ctx;
