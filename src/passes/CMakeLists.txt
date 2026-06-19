@@ -44,6 +44,7 @@ add_library(morok_passes STATIC
   MutualGuardGraph.cpp
   Nanomites.cpp
   PathExplosion.cpp
+  RuntimeSeal.cpp
   TraceKeying.cpp
   DispatcherlessRouting.cpp
   StringEncryption.cpp

@@ -10,6 +10,7 @@
 #include "morok/passes/AntiAnalysis.hpp"
 
 #include "morok/ir/SymbolCloak.hpp"
+#include "morok/passes/RuntimeSeal.hpp"
 
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -284,22 +285,8 @@ void foldPoisonFlag(IRBuilderBase &B, Value *Flag, std::uint64_t Salt,
     st->setAlignment(Align(8));
 }
 
-// The verdict-bound anti-debug seal.  Unlike morok.antidbg.state (a one-way
-// accumulator nothing reads), this global is consumed by the self-checksum diff
-// (SelfChecksumConstants createDiffFunction): a clean run leaves it at its
-// build-time S0 so it contributes 0, while any tripped detector flips it and
-// silently corrupts every self-checksummed constant.  No branch/abort to skip.
 GlobalVariable *antiDebugSeal(Module &M, ir::IRRandom &rng) {
-    if (auto *existing =
-            M.getGlobalVariable("morok.antidbg.seal", /*AllowInternal=*/true))
-        return existing;
-    auto *i64 = Type::getInt64Ty(M.getContext());
-    auto *gv = new GlobalVariable(
-        M, i64, /*isConstant=*/false, GlobalValue::PrivateLinkage,
-        ConstantInt::get(i64, rng.next()), "morok.antidbg.seal");
-    gv->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
-    gv->setAlignment(Align(8));
-    return gv;
+    return runtime_seal::getChannel(M, runtime_seal::kAntiDebugChannel, rng);
 }
 
 // Fold a ZERO-ON-CLEAN detector flag into the seal.  Clean flags leave the seal
@@ -308,35 +295,8 @@ GlobalVariable *antiDebugSeal(Module &M, ir::IRRandom &rng) {
 // Must only be called with flags that are false on a legitimate run (e.g. traced
 // / DYLD-inserted / debugger-parent) — otherwise it would corrupt clean runs.
 void sealFold(IRBuilderBase &B, Value *Flag, std::uint64_t Salt) {
-    Module *M = B.GetInsertBlock()->getModule();
-    GlobalVariable *Seal =
-        M->getGlobalVariable("morok.antidbg.seal", /*AllowInternal=*/true);
-    if (!Seal)
-        return;
-    auto *i64 = B.getInt64Ty();
-    Value *tripped = B.CreateICmpNE(B.CreateZExtOrTrunc(Flag, i64),
-                                    ConstantInt::get(i64, 0),
-                                    "morok.antidbg.seal.trip");
-    auto *cur = B.CreateLoad(i64, Seal, "morok.antidbg.seal.cur");
-    cur->setVolatile(true);
-    cur->setAlignment(Align(8));
-    Value *rot = B.CreateOr(B.CreateShl(cur, ConstantInt::get(i64, 17)),
-                            B.CreateLShr(cur, ConstantInt::get(i64, 47)),
-                            "morok.antidbg.seal.rot");
-    Value *mixed = B.CreateXor(
-        rot, ConstantInt::get(i64, Salt ^ 0xD6E8FEB86659FD93ULL),
-        "morok.antidbg.seal.salt");
-    mixed = B.CreateMul(
-        mixed, ConstantInt::get(i64, (Salt ^ 0x9E3779B97F4A7C15ULL) | 1ULL),
-        "morok.antidbg.seal.mul");
-    mixed = B.CreateAdd(
-        mixed, ConstantInt::get(i64, (Salt + 0xA0761D6478BD642FULL) | 1ULL),
-        "morok.antidbg.seal.mix");
-    Value *next =
-        B.CreateSelect(tripped, mixed, cur, "morok.antidbg.seal.next");
-    auto *st = B.CreateStore(next, Seal);
-    st->setVolatile(true);
-    st->setAlignment(Align(8));
+    runtime_seal::foldFlag(B, runtime_seal::kAntiDebugChannel, Flag, Salt,
+                           "morok.seal.fold.anti_debug");
 }
 
 void foldEnforcedFlag(IRBuilderBase &B, GlobalVariable *State, Value *Flag,

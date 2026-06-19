@@ -189,9 +189,9 @@ std::size_t countNamedInstructions(Function &F, StringRef prefix) {
 }
 
 void checkSealEnforcement(Module &M, Function &F) {
-    CHECK(M.getGlobalVariable("morok.antidbg.seal", true) != nullptr);
-    CHECK(countNamedInstructions(F, "morok.antidbg.seal.trip") >= 1u);
-    CHECK(countNamedInstructions(F, "morok.antidbg.seal.next") >= 1u);
+    CHECK(M.getGlobalVariable("morok.seal.root.anti_debug", true) != nullptr);
+    CHECK(countNamedInstructions(F, "morok.seal.fold.anti_debug.trip") >= 1u);
+    CHECK(countNamedInstructions(F, "morok.seal.fold.anti_debug.next") >= 1u);
 }
 
 std::size_t countPhis(Function &F) {
@@ -7403,6 +7403,9 @@ entry:
         rng));
     Function *Helper = M->getFunction("morok.vm.vm_flagged.exec");
     REQUIRE(Helper);
+    CHECK(M->getGlobalVariable("morok.seal.root.anti_debug", true) != nullptr);
+    CHECK(countNamedInstructions(*Helper, "morok.vm.seal.kdf.key") >= 1u);
+    CHECK(countNamedInstructions(*Helper, "morok.vm.key.seal") >= 1u);
     std::size_t wrapperBinops = 0;
     for (Instruction &I : instructions(*F))
         wrapperBinops += isa<BinaryOperator>(&I) ? 1u : 0u;
@@ -8402,6 +8405,7 @@ entry:
     CHECK(countGlobals(*M, "morok.sc.code.size") == 1u);
     CHECK(countGlobals(*M, "morok.sc.mask") == 2u);
     CHECK(countGlobals(*M, "morok.postlink.sc") == 1u);
+    CHECK(M->getGlobalVariable("morok.seal.root.anti_debug", true) != nullptr);
 
     GlobalVariable *Region = nullptr;
     GlobalVariable *Expected = nullptr;
@@ -8459,11 +8463,17 @@ entry:
     bool hasAtomicWatchdogCryptoLoad = false;
     bool hasDiffValue = false;
     bool hasCryptoDiff = false;
+    bool hasRuntimeSealKdf = false;
+    bool hasRuntimeSealDiff = false;
     bool hasAntiAnalysisPoisonLoad = false;
     bool hasAntiAnalysisDiff = false;
     for (Instruction &I : instructions(*Diff)) {
         hasDiffValue |= I.getName().starts_with("morok.sc.diff");
         hasCryptoDiff |= I.getName().starts_with("morok.sc.crypto.diff");
+        hasRuntimeSealKdf |=
+            I.getName().starts_with("morok.sc.runtime_seal.kdf.key");
+        hasRuntimeSealDiff |=
+            I.getName().starts_with("morok.sc.runtime_seal.diff");
         hasAntiAnalysisDiff |=
             I.getName().starts_with("morok.sc.antianalysis.diff");
         if (auto *CI = dyn_cast<CallInst>(&I))
@@ -8503,6 +8513,8 @@ entry:
     CHECK(hasAntiAnalysisDiff);
     CHECK(hasDiffValue);
     CHECK(hasCryptoDiff);
+    CHECK(hasRuntimeSealKdf);
+    CHECK(hasRuntimeSealDiff);
     CHECK_FALSE(hasTrap);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
@@ -13581,7 +13593,8 @@ define i32 @main() {
     auto *I64 = Type::getInt64Ty(ctx);
     auto *Seal = new GlobalVariable(*M, I64, /*isConstant=*/false,
                                     GlobalValue::PrivateLinkage,
-                                    ConstantInt::get(I64, 0x1234), "morok.antidbg.seal");
+                                    ConstantInt::get(I64, 0x1234),
+                                    "morok.seal.root.anti_debug");
     Seal->setAlignment(Align(8));
     auto engine = morok::core::Xoshiro256pp::fromSeed(7);
     morok::ir::IRRandom rng(engine);
@@ -13629,7 +13642,7 @@ entry:
     CHECK(M->getGlobalVariable("morok.watchdog.heartbeat", true) != nullptr);
     // The verdict-bound anti-debug seal (M1): detectors fold into it and the
     // self-checksum diff consumes it, so detection actually corrupts the verdict.
-    auto *Seal = M->getGlobalVariable("morok.antidbg.seal", true);
+    auto *Seal = M->getGlobalVariable("morok.seal.root.anti_debug", true);
     REQUIRE(Seal != nullptr);
     std::size_t sealStores = 0;
     std::size_t sealSelectStores = 0;
