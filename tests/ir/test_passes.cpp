@@ -8235,6 +8235,32 @@ entry:
     CHECK(Loaded->isThreadLocal());
     CHECK(Active->isThreadLocal());
     CHECK(Faults->isThreadLocal());
+    // Regression for the #99 reopen: marking the cache/state thread-local is not
+    // enough — a thread-local global's symbol is only its per-thread template,
+    // so a direct load/store/GEP through it writes the (shared/read-only)
+    // template and the binary faults at runtime (EXC_BAD_ACCESS).  The accessor
+    // must resolve each thread-local global to the current thread's instance via
+    // llvm.threadlocal.address before using it, so assert the intrinsic is
+    // present once per thread-local access (and that no thread-local global is
+    // used directly as a load/store/GEP pointer operand).
+    std::size_t tlaCalls = 0;
+    for (Instruction &I : instructions(*Accessor))
+        if (auto *CB = dyn_cast<CallInst>(&I))
+            if (Function *Callee = CB->getCalledFunction())
+                if (Callee->getName().starts_with("llvm.threadlocal.address"))
+                    ++tlaCalls;
+    CHECK(tlaCalls >= 4u);
+    for (Instruction &I : instructions(*Accessor)) {
+        Value *Ptr = nullptr;
+        if (auto *LI = dyn_cast<LoadInst>(&I))
+            Ptr = LI->getPointerOperand();
+        else if (auto *SI = dyn_cast<StoreInst>(&I))
+            Ptr = SI->getPointerOperand();
+        else if (auto *GEP = dyn_cast<GetElementPtrInst>(&I))
+            Ptr = GEP->getPointerOperand();
+        if (auto *GV = dyn_cast_or_null<GlobalVariable>(Ptr))
+            CHECK_FALSE(GV->isThreadLocal());
+    }
     CHECK(maxStaticAllocaArrayBytes(*Accessor, "morok.fpp") == 0u);
     CHECK(countGlobals(*M, "morok.fpp.page.loaded.vm_secret") == 1u);
     CHECK(countGlobals(*M, "morok.fpp.page.active.vm_secret") == 1u);

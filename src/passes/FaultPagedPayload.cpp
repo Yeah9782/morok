@@ -312,12 +312,25 @@ GlobalVariable *createDecoys(Module &M, StringRef Suffix,
                            true);
 }
 
+// Resolve the storage pointer for a (possibly thread-local) global.  A
+// thread-local global's symbol names only its per-thread TEMPLATE; a direct
+// load/store/GEP through it touches that template (shared / read-only) instead
+// of the calling thread's instance — so the per-thread page cache (#99) faults
+// (EXC_BAD_ACCESS writing the template) or silently shares state.
+// llvm.threadlocal.address maps the global to the current thread's copy, which
+// is required to make the thread-local cache actually per-thread.
+Value *statePtr(Builder &B, GlobalVariable *GV) {
+    if (GV->isThreadLocal())
+        return B.CreateThreadLocalAddress(GV);
+    return GV;
+}
+
 Value *globalBytePtr(Builder &B, GlobalVariable *GV, Value *Idx,
                      const Twine &Name) {
     auto *I32 = B.getInt32Ty();
     auto *ArrTy = cast<ArrayType>(GV->getValueType());
-    return B.CreateInBoundsGEP(ArrTy, GV, {ConstantInt::get(I32, 0), Idx},
-                               Name);
+    return B.CreateInBoundsGEP(ArrTy, statePtr(B, GV),
+                               {ConstantInt::get(I32, 0), Idx}, Name);
 }
 
 LoadInst *volatileLoadI8(Builder &B, Value *Ptr, const Twine &Name) {
@@ -383,7 +396,8 @@ Function *createAccessor(Module &M, Payload &P,
     Value *InPage =
         B.CreateURem(SafeIndex, ConstantInt::get(I32, PageSize),
                      "morok.fpp.page.offset");
-    auto *ActiveLoad = B.CreateLoad(I32, Active, "morok.fpp.page.active.load");
+    auto *ActiveLoad =
+        B.CreateLoad(I32, statePtr(B, Active), "morok.fpp.page.active.load");
     ActiveLoad->setVolatile(true);
     ActiveLoad->setAlignment(Align(4));
     Value *LoadedPtr =
@@ -478,16 +492,17 @@ Function *createAccessor(Module &M, Payload &P,
 
     B.SetInsertPoint(DecryptDone);
     volatileStore(B, ConstantInt::get(I8, 1), LoadedPtr);
-    auto *ActiveStore = B.CreateStore(Page, Active);
+    auto *ActiveStore = B.CreateStore(Page, statePtr(B, Active));
     ActiveStore->setVolatile(true);
     ActiveStore->setAlignment(Align(4));
-    auto *FaultLoad = B.CreateLoad(I64, Faults, "morok.fpp.fault.count.load");
+    auto *FaultLoad =
+        B.CreateLoad(I64, statePtr(B, Faults), "morok.fpp.fault.count.load");
     FaultLoad->setVolatile(true);
     FaultLoad->setAlignment(Align(8));
     Value *FaultNext =
         B.CreateAdd(FaultLoad, ConstantInt::get(I64, 1),
                     "morok.fpp.fault.count.next");
-    auto *FaultStore = B.CreateStore(FaultNext, Faults);
+    auto *FaultStore = B.CreateStore(FaultNext, statePtr(B, Faults));
     FaultStore->setVolatile(true);
     FaultStore->setAlignment(Align(8));
     if (Params.bind_to_runtime_seal)
