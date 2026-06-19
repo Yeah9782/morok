@@ -92,6 +92,32 @@ root_path() {
   esac
 }
 
+# Build the derived static-link config: the chosen preset/config with
+# function_call_obfuscate forced off (dlsym-based FCO cannot work in a static
+# binary).  A pre-existing [passes.function_call_obfuscate] table in the source
+# config is stripped first — TOML forbids declaring a table twice, and a
+# duplicate makes the whole derived file fail to parse, causing the plugin to
+# silently drop EVERY protection (issue #42).  The build also passes the preset
+# as a fallback so even a parse failure cannot leave the binary unprotected.
+#   $1: source config path (empty -> use the preset)
+#   $2: preset name
+#   $3: output path
+derive_static_config() {
+  local src="$1" preset="$2" out="$3"
+  {
+    if [ -n "$src" ]; then
+      awk '
+        /^[[:space:]]*\[passes\.function_call_obfuscate\][[:space:]]*$/ { skip=1; next }
+        /^[[:space:]]*\[/ { skip=0 }
+        !skip { print }
+      ' "$src"
+    else
+      printf '[global]\npreset = "%s"\n' "$preset"
+    fi
+    printf '\n[passes.function_call_obfuscate]\nenabled = false\n'
+  } >"$out"
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --source) SRC="$2"; shift 2 ;;
@@ -112,6 +138,9 @@ while [ "$#" -gt 0 ]; do
     --no-macos) BUILD_MACOS=0; shift ;;
     --no-strip) STRIP_BINARIES=0; shift ;;
     -h|--help) usage; exit 0 ;;
+    # Test hook: emit the derived static config and exit (see
+    # tests/e2e/static_config_layering.sh).  Args: <src|""> <preset> <out>.
+    --emit-static-config) derive_static_config "$2" "$3" "$4"; exit 0 ;;
     --) shift; break ;;
     -*)
       die "unknown option: $1"
@@ -249,15 +278,11 @@ build_linux() {
     # link (there is no dynamic import table).  Disable it via a derived config
     # layered on the chosen preset/config.
     local static_cfg="$OUT_DIR/.morok-static-$STEM.toml"
-    {
-      if [ -n "$CONFIG" ]; then
-        cat "$CONFIG"
-      else
-        printf '[global]\npreset = "%s"\n' "$PRESET"
-      fi
-      printf '\n[passes.function_call_obfuscate]\nenabled = false\n'
-    } >"$static_cfg"
-    morok_cfg=(-mllvm "-morok-config=$static_cfg")
+    derive_static_config "$CONFIG" "$PRESET" "$static_cfg"
+    # Keep the preset as an explicit fallback: if the derived config ever fails
+    # to parse, the plugin must still apply the intended protections rather than
+    # silently produce a bare, unprotected binary.
+    morok_cfg=(-mllvm "-morok-config=$static_cfg" -mllvm "-morok-preset=$PRESET")
   fi
 
   local out="$OUT_DIR/$STEM-linux-$arch$static_suffix"

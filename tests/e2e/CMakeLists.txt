@@ -60,6 +60,13 @@ else()
   set(_program_skip "cpp_rtti.cpp 07_regex.c")
 endif()
 
+# Build-tooling regression (issue #42): the static-link derived config must stay
+# valid TOML and protective.  Needs only bash/awk/grep — no compiler or plugin.
+add_test(NAME "e2e/static_config_layering"
+  COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/static_config_layering.sh"
+          "${CMAKE_SOURCE_DIR}/cross_build.sh")
+set_tests_properties("e2e/static_config_layering" PROPERTIES LABELS "e2e")
+
 foreach(preset low mid high)
   add_test(NAME "e2e/differential_${preset}"
     COMMAND bash "${_driver}"
