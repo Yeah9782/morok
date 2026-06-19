@@ -32,8 +32,8 @@ struct TracerAttestationParams {
 };
 
 /// Materialize a Linux/x86_64 buddy-process tracer that injects runtime-only
-/// words into the parent, folds them into the RuntimeSeal tracer channel, and
-/// folds delivery mismatch into the consumed anti-debug seal channel.
+/// words into the parent and folds only delivery mismatch deltas into the
+/// RuntimeSeal tracer and consumed anti-debug seal channels.
 bool tracerAttestationModule(llvm::Module &M,
                              const TracerAttestationParams &params,
                              morok::ir::IRRandom &rng);

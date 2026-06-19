@@ -202,7 +202,8 @@ void emitChildExit(IRBuilder<> &B, Module &M) {
 
 void emitShareRound(Module &M, Function &Ctor, IRBuilder<> &B,
                     Function *ShareHelper, GlobalVariable *AntiBuddyPid,
-                    std::uint32_t Index, std::uint64_t FoldSalt) {
+                    bool BindToRuntimeSeal, std::uint32_t Index,
+                    std::uint64_t FoldSalt) {
     LLVMContext &Ctx = M.getContext();
     auto *I32 = Type::getInt32Ty(Ctx);
     auto *I64 = Type::getInt64Ty(Ctx);
@@ -354,11 +355,15 @@ void emitShareRound(Module &M, Function &Ctor, IRBuilder<> &B,
     // bytecode / checksum constants.  Tamper (a debugger steals the trace, so
     // the child cannot poke the expected share) makes the diff non-zero, the
     // seal diverges, and seal-dependent code fails closed.
-    runtime_seal::foldWord(FoldB, runtime_seal::kTracerChannel, WordDiff,
-                           FoldSalt, "morok.tracer.seal");
-    runtime_seal::foldFlag(FoldB, runtime_seal::kAntiDebugChannel, Mismatch,
-                           FoldSalt ^ 0x8A6F0E4D27D5C139ULL,
-                           "morok.tracer.antidbg");
+    // The bind_to_runtime_seal opt-out must also leave any pre-existing seal
+    // channels alone, because another pass may have created them already.
+    if (BindToRuntimeSeal) {
+        runtime_seal::foldWord(FoldB, runtime_seal::kTracerChannel, WordDiff,
+                               FoldSalt, "morok.tracer.seal");
+        runtime_seal::foldFlag(FoldB, runtime_seal::kAntiDebugChannel, Mismatch,
+                               FoldSalt ^ 0x8A6F0E4D27D5C139ULL,
+                               "morok.tracer.antidbg");
+    }
     FoldB.CreateBr(ContBB);
 
     B.SetInsertPoint(ContBB);
@@ -390,7 +395,8 @@ bool tracerAttestationModule(Module &M, const TracerAttestationParams &Params,
     IRBuilder<> B(&Ctor->getEntryBlock());
     const std::uint32_t ShareCount = std::min(Params.shares, kMaxShares);
     for (std::uint32_t I = 0; I < ShareCount; ++I)
-        emitShareRound(M, *Ctor, B, ShareHelper, AntiBuddyPid, I, Rng.next());
+        emitShareRound(M, *Ctor, B, ShareHelper, AntiBuddyPid,
+                       Params.bind_to_runtime_seal, I, Rng.next());
     B.CreateRetVoid();
     appendToGlobalCtors(M, Ctor, 0);
     return true;

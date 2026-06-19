@@ -9024,6 +9024,35 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("tracerAttestationModule honors runtime seal binding opt-out") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-unknown-linux-gnu"
+define i32 @main() {
+entry:
+  ret i32 0
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(97108);
+    morok::ir::IRRandom rng(engine);
+    morok::passes::runtime_seal::getChannel(
+        *M, morok::passes::runtime_seal::kAntiDebugChannel, rng);
+    morok::passes::runtime_seal::getChannel(
+        *M, morok::passes::runtime_seal::kTracerChannel, rng);
+
+    morok::passes::TracerAttestationParams params;
+    params.shares = 1;
+    params.bind_to_runtime_seal = false;
+    CHECK(morok::passes::tracerAttestationModule(*M, params, rng));
+
+    Function *Ctor = M->getFunction("morok.tracer.attest");
+    REQUIRE(Ctor != nullptr);
+    CHECK(countNamedInstructions(*Ctor, "morok.tracer.seal.next") == 0u);
+    CHECK(countNamedInstructions(*Ctor, "morok.tracer.antidbg.next") == 0u);
+    CHECK(countNamedInstructions(*Ctor, "morok.tracer.word.diff") == 1u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("tracerAttestationModule skips fork and signal owners") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
