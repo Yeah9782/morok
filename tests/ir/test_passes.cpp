@@ -9866,8 +9866,9 @@ no:
     std::size_t volatileLoads = 0;
     std::size_t volatileStores = 0;
     std::size_t recordBlocks = 0;
-    std::size_t guardLatentStores = 0;
-    std::size_t recordLatentStores = 0;
+    std::size_t latentStores = 0;
+    std::size_t latentAtomicLoads = 0;
+    std::size_t latentAtomicRmws = 0;
     std::size_t latentRecordSelects = 0;
     std::size_t delayedFires = 0;
     std::size_t delayedBranchKeys = 0;
@@ -9906,19 +9907,25 @@ no:
                 volatileLoads += LI->isVolatile() ? 1u : 0u;
                 if (isAntiAnalysisPoisonLoad(LI))
                     ++antiAnalysisPoisonLoads;
+                if (isMonotonicAtomicLoadFrom(LI, "morok.trace.latent"))
+                    ++latentAtomicLoads;
                 if (isMonotonicAtomicLoadFrom(LI, "morok.watchdog.crypto"))
                     ++watchdogCryptoLoads;
             }
             if (auto *SI = dyn_cast<StoreInst>(&I)) {
                 volatileStores += SI->isVolatile() ? 1u : 0u;
-                if (SI->isVolatile() &&
-                    SI->getPointerOperand()->getName().starts_with(
-                        "morok.trace.latent")) {
-                    if (BB.getName().starts_with("morok.trace.record"))
-                        ++recordLatentStores;
-                    else
-                        ++guardLatentStores;
-                }
+                if (SI->getPointerOperand()->getName().starts_with(
+                        "morok.trace.latent"))
+                    ++latentStores;
+            }
+            if (auto *RMW = dyn_cast<AtomicRMWInst>(&I)) {
+                if (RMW->isVolatile() &&
+                    RMW->getOperation() == AtomicRMWInst::Or &&
+                    RMW->getOrdering() == AtomicOrdering::Monotonic &&
+                    RMW->getAlign() == Align(8) &&
+                    RMW->getPointerOperand()->getName().starts_with(
+                        "morok.trace.latent"))
+                    ++latentAtomicRmws;
             }
             if (auto *BI = dyn_cast<BranchInst>(&I)) {
                 if (BI->isConditional() &&
@@ -9955,9 +9962,10 @@ no:
     CHECK(volatileLoads >= 4u);
     CHECK(volatileStores >= 4u);
     CHECK(recordBlocks >= 4u);
-    CHECK(guardLatentStores >= guards);
-    CHECK(recordLatentStores == 0u);
+    CHECK(latentStores == 0u);
+    CHECK(latentAtomicRmws >= guards);
     CHECK(latentRecordSelects >= guards);
+    CHECK(latentAtomicLoads >= delayedFires);
     CHECK(delayedFires >= 1u);
     CHECK(delayedBranchKeys + delayedReturnKeys + delayedSwitchKeys >= 1u);
     CHECK(bodyBranchPoisons + bodyReturnPoisons + bodySwitchPoisons >= 1u);

@@ -354,18 +354,19 @@ void invalidateCallerEffects(Function &F) {
 void recordTraceState(IRBuilder<NoFolder> &B, GlobalVariable *Latent,
                       Value *Diff, ir::IRRandom &Rng) {
     auto *I64 = B.getInt64Ty();
-    auto *Cur = B.CreateLoad(I64, Latent, "morok.trace.latent.load");
-    Cur->setVolatile(true);
-    Cur->setAlignment(Align(8));
-    Value *Mixed = mix64(B, Cur, Diff, Rng.next(), "morok.trace.record.mix");
+    Value *Mixed =
+        mix64(B, Diff, ConstantInt::get(I64, Rng.next()), Rng.next(),
+              "morok.trace.record.mix");
+    Value *Poison = B.CreateOr(Mixed, ConstantInt::get(I64, 1),
+                               "morok.trace.record.poison");
     Value *Changed =
         B.CreateICmpNE(Diff, ConstantInt::get(I64, 0),
                        "morok.trace.record.changed");
-    Value *Next =
-        B.CreateSelect(Changed, Mixed, Cur, "morok.trace.record.latent");
-    auto *Store = B.CreateStore(Next, Latent);
-    Store->setVolatile(true);
-    Store->setAlignment(Align(8));
+    Value *Delta = B.CreateSelect(Changed, Poison, ConstantInt::get(I64, 0),
+                                  "morok.trace.record.latent");
+    auto *Update = B.CreateAtomicRMW(AtomicRMWInst::Or, Latent, Delta, Align(8),
+                                    AtomicOrdering::Monotonic);
+    Update->setVolatile(true);
 }
 
 GuardedBlock splitWithGuard(BasicBlock *BB, AllocaInst *State,
@@ -516,6 +517,7 @@ DelayedSample delayedSample(IRBuilder<NoFolder> &B, GlobalVariable *Latent,
     auto *I64 = B.getInt64Ty();
     auto *Loaded = B.CreateLoad(I64, Latent, "morok.trace.delay.load");
     Loaded->setVolatile(true);
+    Loaded->setAtomic(AtomicOrdering::Monotonic);
     Loaded->setAlignment(Align(8));
     Value *LoadedKey = Loaded;
     if (Module *M = B.GetInsertBlock()->getModule()) {
