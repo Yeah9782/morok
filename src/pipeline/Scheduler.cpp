@@ -945,6 +945,14 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
         }
     }
 
+    // M4: bind reused leaf helpers (l1/g*/… in the validation cluster) to the
+    // anti-debug seal, so a keygen calling them directly from an injected context
+    // gets garbage.  Runs after the self-checksum loop so the seal exists and the
+    // already-poisoned helpers (m0/m1/l0 — poisonReturns already folds the
+    // seal-bearing diff into their returns) are skipped to avoid an XOR double-fold.
+    if (InitialModuleGrowthOk)
+        changed |= passes::bindLeafHelpersToSeal(M, rng);
+
     // Sensitive generated helpers are deliberately skipped by the normal
     // per-function loop because they are `morok.*`.  Once anti-debug,
     // anti-hook, and integrity passes have emitted their helpers, lift the

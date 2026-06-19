@@ -774,6 +774,72 @@ bool selfChecksumConstantsFunction(Function &F,
     return true;
 }
 
+bool bindLeafHelpersToSeal(Module &M, ir::IRRandom &Rng) {
+    (void)Rng; // reserved for future per-site diversification
+    GlobalVariable *Seal =
+        M.getGlobalVariable("morok.antidbg.seal", /*AllowInternal=*/true);
+    if (!Seal || !Seal->hasInitializer())
+        return false;
+    auto *S0CI = dyn_cast<ConstantInt>(Seal->getInitializer());
+    if (!S0CI)
+        return false;
+    const std::uint64_t S0 = S0CI->getZExtValue();
+    auto *I64 = Type::getInt64Ty(M.getContext());
+
+    // A function is already seal-bound if its body calls a self-checksum diff
+    // function (poisonReturns folds the seal-dependent diff into its returns) —
+    // folding again would XOR the seal twice and cancel it.
+    auto isSelfChecked = [](Function &F) {
+        for (Instruction &I : instructions(F))
+            if (auto *CB = dyn_cast<CallBase>(&I))
+                if (Function *C = CB->getCalledFunction())
+                    if (C->getName().starts_with("morok.sc.diff"))
+                        return true;
+        return false;
+    };
+    // Restrict to the validation cluster: helpers called by a self-checksum'd or
+    // virtualized function.  This binds exactly the reused seal helpers (l1/g*/…)
+    // without touching unrelated leaves across the module.
+    auto inValidationCluster = [&](Function &F) {
+        for (User *U : F.users())
+            if (auto *CB = dyn_cast<CallBase>(U))
+                if (Function *Caller = CB->getFunction())
+                    if (Caller->getName().starts_with("morok.vm.") ||
+                        isSelfChecked(*Caller))
+                        return true;
+        return false;
+    };
+
+    bool Changed = false;
+    for (Function &F : M) {
+        if (F.isDeclaration() || F.isVarArg())
+            continue;
+        if (F.getName().starts_with("morok.") || F.getName() == "main")
+            continue;
+        if (!F.getReturnType()->isIntegerTy())
+            continue;
+        if (isSelfChecked(F) || !inValidationCluster(F))
+            continue;
+        for (BasicBlock &BB : F) {
+            auto *RI = dyn_cast<ReturnInst>(BB.getTerminator());
+            if (!RI || !RI->getReturnValue() ||
+                !RI->getReturnValue()->getType()->isIntegerTy())
+                continue;
+            IRBuilder<> B(RI);
+            Value *RV = RI->getReturnValue();
+            auto *Cur = B.CreateLoad(I64, Seal, "morok.helper.seal");
+            Cur->setVolatile(true);
+            Cur->setAlignment(Align(8));
+            Value *Delta =
+                B.CreateXor(Cur, ConstantInt::get(I64, S0), "morok.helper.delta");
+            Value *DeltaT = B.CreateZExtOrTrunc(Delta, RV->getType());
+            RI->setOperand(0, B.CreateXor(RV, DeltaT, "morok.helper.bound"));
+            Changed = true;
+        }
+    }
+    return Changed;
+}
+
 PreservedAnalyses SelfChecksumConstantsPass::run(Function &F,
                                                  FunctionAnalysisManager &) {
     ir::IRRandom Rng(engine_);

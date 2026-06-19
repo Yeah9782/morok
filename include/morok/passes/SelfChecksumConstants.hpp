@@ -34,6 +34,15 @@ bool selfChecksumConstantsFunction(llvm::Function &F,
                                    const SelfChecksumParams &params,
                                    morok::ir::IRRandom &rng);
 
+/// M4: bind reused leaf helpers to the anti-debug seal.  Folds (seal ^ S0) into
+/// the integer return value of internal, non-main helper functions in the
+/// validation cluster that are NOT already self-checksum-poisoned (to avoid an
+/// XOR double-fold).  On a clean run seal==S0 so the fold is identity; under a
+/// tripped detector (a keygen running under DYLD injection, etc.) the helper
+/// returns garbage, defeating direct helper reuse.  Must run AFTER the
+/// self-checksum pass so the seal exists and poisoned helpers can be detected.
+bool bindLeafHelpersToSeal(llvm::Module &M, morok::ir::IRRandom &rng);
+
 /// New-PM wrapper for standalone use (`-passes=morok-selfcheck`).
 class SelfChecksumConstantsPass
     : public llvm::PassInfoMixin<SelfChecksumConstantsPass> {

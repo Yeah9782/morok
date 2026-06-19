@@ -11026,6 +11026,51 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("bindLeafHelpersToSeal binds validation-cluster leaf returns") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @helper(i32 %x) {
+  %y = add i32 %x, 7
+  ret i32 %y
+}
+define i32 @outside(i32 %x) {
+  %y = add i32 %x, 9
+  ret i32 %y
+}
+define i32 @"morok.vm.k.exec"(i32 %x) {
+  %r = call i32 @helper(i32 %x)
+  ret i32 %r
+}
+define i32 @main() {
+  %r = call i32 @outside(i32 3)
+  ret i32 %r
+}
+)ir");
+    auto *I64 = Type::getInt64Ty(ctx);
+    auto *Seal = new GlobalVariable(*M, I64, /*isConstant=*/false,
+                                    GlobalValue::PrivateLinkage,
+                                    ConstantInt::get(I64, 0x1234), "morok.antidbg.seal");
+    Seal->setAlignment(Align(8));
+    auto engine = morok::core::Xoshiro256pp::fromSeed(7);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::bindLeafHelpersToSeal(*M, rng));
+
+    auto usesSealIn = [&](const char *fn) {
+        Function *F = M->getFunction(fn);
+        for (User *U : Seal->users())
+            if (auto *I = dyn_cast<Instruction>(U))
+                if (I->getFunction() == F)
+                    return true;
+        return false;
+    };
+    // helper is called by a virtualized exec -> in the validation cluster -> bound.
+    CHECK(usesSealIn("helper"));
+    // outside is only called by main -> not in the cluster -> left alone.
+    CHECK_FALSE(usesSealIn("outside"));
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("antiDebuggingModule emits Darwin source checks and cloaked DYLD "
           "census") {
     LLVMContext ctx;
@@ -11059,6 +11104,14 @@ entry:
     CHECK(M->getFunction("sysctl") == nullptr);
     CHECK(M->getFunction("csops") == nullptr);
     CHECK(M->getFunction("getenv") != nullptr);
+    // M2 const→thunk: svc bytes live in a const, JIT-published into a global
+    // thunk at runtime; the checks call through it (no inline svc landmark).
+    CHECK(M->getGlobalVariable("morok.svc.thunk", true) != nullptr);
+    CHECK(M->getFunction("morok.svc.fallback") != nullptr);
+    CHECK(M->getGlobalVariable("morok.svc.code", true) != nullptr);
+    // M3: the loaded-image census enumerates dyld images to flag foreign dylibs.
+    CHECK(M->getFunction("_dyld_get_image_name") != nullptr);
+    CHECK(M->getFunction("_dyld_image_count") != nullptr);
     CHECK(M->getFunction("morok.antidbg.probe") != nullptr);
     CHECK(M->getFunction("morok.antidbg.probe.watch") != nullptr);
     CHECK(M->getFunction("morok.watchdog") != nullptr);

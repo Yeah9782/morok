@@ -505,11 +505,128 @@ bool useDirectDarwinSyscalls(const Triple &TT) {
     return TT.isOSDarwin() && TT.getArch() == Triple::x86_64;
 }
 
-// Direct Darwin arm64 BSD syscall via svc — used ONLY for the interposable
-// anti-debug checks (ptrace/sysctl/csops/getpid) so they cannot be DYLD-rebound,
-// while leaving infra syscalls (mmap/mprotect/...) on their existing path.
-// ABI: x16 = BSD number (no 0x2000000 class bit), args x0-x5, svc #0x80, result
-// x0; arg0 is tied to the x0 output via the matching "0" constraint.
+// The raw `svc #0x80` (x16=number, args x0-x5, result x0; arg0 tied to the x0
+// output via the matching "0" constraint).  Used only inside the native fallback
+// and the JIT thunk template — NOT inlined into the anti-debug checks.
+Value *emitArm64SvcInlineAsm(IRBuilder<> &B, Module &M, Value *Nr,
+                             const std::array<Value *, 6> &A) {
+    auto *ip = intPtrTy(M);
+    std::vector<Type *> params(7, ip);
+    auto *asmTy = FunctionType::get(ip, params, false);
+    InlineAsm *svc = InlineAsm::get(
+        asmTy, "svc #0x80",
+        "={x0},{x16},0,{x1},{x2},{x3},{x4},{x5},~{memory},~{cc}",
+        /*hasSideEffects=*/true);
+    return B.CreateCall(asmTy, svc, {Nr, A[0], A[1], A[2], A[3], A[4], A[5]},
+                        "morok.darwin.svc");
+}
+
+// M2 (const→thunk): build the syscall thunk infrastructure once.  The svc stub
+// bytes live XOR-encoded in a const; an upgrade ctor copies them into a MAP_JIT
+// page at runtime and publishes the page in `morok.svc.thunk`.  The global is
+// seeded with a native fallback (the single inline svc) so it is never null even
+// if MAP_JIT is unavailable (hardened runtime).  The anti-debug checks call
+// through the thunk, so no `svc` appears inline in their code — a static scan of
+// the checks finds an indirect call, not a syscall landmark.
+GlobalVariable *getOrCreateSvcThunk(Module &M) {
+    if (auto *g = M.getGlobalVariable("morok.svc.thunk", /*AllowInternal=*/true))
+        return g;
+    LLVMContext &ctx = M.getContext();
+    auto *ip = intPtrTy(M);
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ptr = PointerType::getUnqual(ctx);
+    auto *voidTy = Type::getVoidTy(ctx);
+    std::vector<Type *> params(7, ip);
+    auto *sysTy = FunctionType::get(ip, params, false);
+
+    // Native fallback: the lone inline svc, used only if MAP_JIT fails.
+    Function *fb = Function::Create(sysTy, GlobalValue::InternalLinkage,
+                                    "morok.svc.fallback", &M);
+    {
+        BasicBlock *bb = BasicBlock::Create(ctx, "entry", fb);
+        IRBuilder<> FB(bb);
+        auto ai = fb->arg_begin();
+        Value *nr = &*ai++;
+        std::array<Value *, 6> a{};
+        for (std::size_t k = 0; k < 6; ++k)
+            a[k] = &*ai++;
+        FB.CreateRet(emitArm64SvcInlineAsm(FB, M, nr, a));
+    }
+
+    auto *thunk =
+        new GlobalVariable(M, ptr, /*isConstant=*/false,
+                           GlobalValue::PrivateLinkage, fb, "morok.svc.thunk");
+    thunk->setAlignment(Align(8));
+
+    // mov x16,x0; mov x0,x1; mov x1,x2; mov x2,x3; mov x3,x4; mov x4,x5;
+    // mov x5,x6; svc #0x80; ret  — shuffles the C-ABI args into the syscall ABI.
+    constexpr std::uint32_t KEY = 0x9E3779B9u;
+    const std::uint32_t instr[9] = {0xAA0003F0u, 0xAA0103E0u, 0xAA0203E1u,
+                                    0xAA0303E2u, 0xAA0403E3u, 0xAA0503E4u,
+                                    0xAA0603E5u, 0xD4001001u, 0xD65F03C0u};
+    auto *arrTy = ArrayType::get(i32, 9);
+    std::vector<Constant *> enc;
+    for (std::uint32_t v : instr)
+        enc.push_back(ConstantInt::get(i32, v ^ KEY));
+    auto *code = new GlobalVariable(M, arrTy, /*isConstant=*/true,
+                                    GlobalValue::PrivateLinkage,
+                                    ConstantArray::get(arrTy, enc),
+                                    "morok.svc.code");
+    code->setAlignment(Align(4));
+
+    FunctionCallee mmapFn = M.getOrInsertFunction(
+        "mmap",
+        FunctionType::get(ptr, {ptr, ip, i32, i32, i32, ip}, false));
+    FunctionCallee jitWP = M.getOrInsertFunction(
+        "pthread_jit_write_protect_np",
+        FunctionType::get(voidTy, {i32}, false));
+    FunctionCallee icache = M.getOrInsertFunction(
+        "sys_icache_invalidate", FunctionType::get(voidTy, {ptr, ip}, false));
+
+    Function *ctor = makeCtorShell(M, "morok.svc.up");
+    BasicBlock *entry = &ctor->getEntryBlock();
+    BasicBlock *ok = BasicBlock::Create(ctx, "ok", ctor);
+    BasicBlock *done = BasicBlock::Create(ctx, "done", ctor);
+    IRBuilder<> CB(entry);
+    // PROT_READ|WRITE|EXEC = 7; MAP_PRIVATE|MAP_ANON|MAP_JIT = 0x2|0x1000|0x800.
+    Value *page = CB.CreateCall(
+        mmapFn, {ConstantPointerNull::get(ptr), ConstantInt::get(ip, 4096),
+                 ConstantInt::get(i32, 7), ConstantInt::get(i32, 0x1802),
+                 ConstantInt::getSigned(i32, -1), ConstantInt::get(ip, 0)});
+    Value *failed = CB.CreateICmpEQ(
+        page, CB.CreateIntToPtr(ConstantInt::getSigned(ip, -1), ptr));
+    CB.CreateCondBr(failed, done, ok);
+
+    IRBuilder<> OB(ok);
+    OB.CreateCall(jitWP, {ConstantInt::get(i32, 0)});
+    for (std::uint64_t k = 0; k < 9; ++k) {
+        Value *encWord = OB.CreateAlignedLoad(
+            i32,
+            OB.CreateInBoundsGEP(arrTy, code,
+                                 {ConstantInt::get(ip, 0),
+                                  ConstantInt::get(ip, k)}),
+            Align(4));
+        Value *decWord = OB.CreateXor(encWord, ConstantInt::get(i32, KEY));
+        OB.CreateAlignedStore(
+            decWord,
+            OB.CreateInBoundsGEP(i32, page, ConstantInt::get(ip, k)), Align(4));
+    }
+    OB.CreateCall(jitWP, {ConstantInt::get(i32, 1)});
+    OB.CreateCall(icache, {page, ConstantInt::get(ip, 36)});
+    auto *st = OB.CreateStore(page, thunk);
+    st->setVolatile(true);
+    OB.CreateBr(done);
+
+    IRBuilder<> DB(done);
+    DB.CreateRetVoid();
+    appendToGlobalCtors(M, ctor, 0);
+    return thunk;
+}
+
+// Direct Darwin arm64 BSD syscall — used ONLY for the interposable anti-debug
+// checks (ptrace/sysctl/csops/getpid) so they cannot be DYLD-rebound, while
+// infra syscalls (mmap/mprotect/...) stay on their existing path.  Routed
+// through the const→JIT thunk so no `svc` is emitted inline in the checks.
 Value *emitDarwinArm64Svc(IRBuilder<> &B, Module &M, std::uint32_t Number,
                           std::initializer_list<Value *> Args) {
     auto *ip = intPtrTy(M);
@@ -520,13 +637,12 @@ Value *emitDarwinArm64Svc(IRBuilder<> &B, Module &M, std::uint32_t Number,
     for (Value *arg : Args)
         if (i < a.size())
             a[i++] = toSyscallArg(B, arg);
+    GlobalVariable *thunk = getOrCreateSvcThunk(M);
     std::vector<Type *> params(7, ip);
-    auto *asmTy = FunctionType::get(ip, params, false);
-    InlineAsm *svc = InlineAsm::get(
-        asmTy, "svc #0x80",
-        "={x0},{x16},0,{x1},{x2},{x3},{x4},{x5},~{memory},~{cc}",
-        /*hasSideEffects=*/true);
-    return B.CreateCall(asmTy, svc,
+    auto *sysTy = FunctionType::get(ip, params, false);
+    auto *fp = B.CreateLoad(PointerType::getUnqual(M.getContext()), thunk,
+                            "morok.svc.fp");
+    return B.CreateCall(sysTy, fp,
                         {ConstantInt::get(ip, Number), a[0], a[1], a[2], a[3],
                          a[4], a[5]},
                         "morok.darwin.svc");
