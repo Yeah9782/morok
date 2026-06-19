@@ -318,6 +318,36 @@ std::size_t countFunctions(Module &M, StringRef prefix) {
     return n;
 }
 
+std::vector<unsigned> ctorPrioritiesFor(Module &M, StringRef functionPrefix) {
+    std::vector<Function *> matches;
+    for (Function &F : M)
+        if (F.getName().starts_with(functionPrefix))
+            matches.push_back(&F);
+
+    std::vector<unsigned> priorities;
+    GlobalVariable *ctors = M.getGlobalVariable("llvm.global_ctors");
+    if (!ctors || !ctors->hasInitializer())
+        return priorities;
+    auto *array = dyn_cast<ConstantArray>(ctors->getInitializer());
+    if (!array)
+        return priorities;
+
+    for (Use &elem : array->operands()) {
+        auto *entry = dyn_cast<ConstantStruct>(elem.get());
+        if (!entry || entry->getNumOperands() < 2)
+            continue;
+        auto *priority = dyn_cast<ConstantInt>(entry->getOperand(0));
+        auto *target = dyn_cast<Constant>(entry->getOperand(1));
+        if (!priority || !target)
+            continue;
+        for (Function *F : matches)
+            if (constantReferencesGlobal(target, F))
+                priorities.push_back(
+                    static_cast<unsigned>(priority->getZExtValue()));
+    }
+    return priorities;
+}
+
 std::size_t countAliases(Module &M) {
     return static_cast<std::size_t>(
         std::distance(M.alias_begin(), M.alias_end()));
@@ -11873,6 +11903,54 @@ TEST_CASE("stringEncryptModule falls back to per-string decryptors") {
     CHECK(sawLoopDecryptor);
     CHECK(sawStaticAnalysisBarrier);
     CHECK(sawDecryptorMixer);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+// Regression for #38: when a string address escapes through static data, the
+// pass cannot inject a first-use call before every read and must fall back to a
+// global constructor.  That decryptor must run before ordinary user ctors such
+// as priority-150 startup hooks, or they can observe ciphertext.
+TEST_CASE("stringEncryptModule schedules fallback decryptors before user ctors") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target datalayout = "e-p:64:64"
+@early.str = private constant [13 x i8] c"early-secret\00"
+@early.ptr = private global ptr @early.str
+
+declare void @sink(ptr)
+
+define void @user_ctor() {
+entry:
+  %p = load ptr, ptr @early.ptr
+  call void @sink(ptr %p)
+  ret void
+}
+
+@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [
+  { i32, ptr, ptr } { i32 150, ptr @user_ctor, ptr null }
+]
+)ir");
+    REQUIRE(M);
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(3801);
+    morok::ir::IRRandom rng(engine);
+    CHECK(morok::passes::stringEncryptModule(
+        *M, morok::passes::StrEncParams{}, rng));
+
+    CHECK_FALSE(hasReadableByteString(*M, "early-secret"));
+    CHECK(countFunctions(*M, "morok.strdec") == 1u);
+
+    std::vector<unsigned> decryptorPriorities =
+        ctorPrioritiesFor(*M, "morok.strdec");
+    REQUIRE(decryptorPriorities.size() == 1u);
+    CHECK(decryptorPriorities[0] == 0u);
+
+    std::vector<unsigned> userPriorities =
+        ctorPrioritiesFor(*M, "user_ctor");
+    REQUIRE(userPriorities.size() == 1u);
+    CHECK(userPriorities[0] == 150u);
+    CHECK(decryptorPriorities[0] < userPriorities[0]);
+
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 

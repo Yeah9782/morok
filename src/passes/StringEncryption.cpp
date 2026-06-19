@@ -54,6 +54,7 @@ constexpr std::uint64_t kUnrollThreshold = 64; // ≤ this ⇒ unrolled, else lo
 // never inflates the stack frame.  Larger strings fall back to the in-place
 // global decryptor instead of the stack path.
 constexpr std::uint64_t kMaxStackStringBytes = 4096;
+constexpr int kCtorDecryptPriority = 0;
 
 bool eligible(const GlobalVariable &gv) {
     if (!gv.hasInitializer() || !gv.hasLocalLinkage())
@@ -654,8 +655,9 @@ bool stringEncryptModule(Module &M, const StrEncParams &params,
         collectUsingFunctions(target, users, escapes);
         users.erase(decFn);
         if (escapes || users.empty()) {
-            appendToGlobalCtors(M, decFn,
-                                static_cast<int>(rng.range(40000)) + 1);
+            // Fallback constructor decryption must complete before any user
+            // constructor can observe ciphertext through escaped static data.
+            appendToGlobalCtors(M, decFn, kCtorDecryptPriority);
         } else {
             for (Function *UF : users) {
                 if (UF->isDeclaration())
