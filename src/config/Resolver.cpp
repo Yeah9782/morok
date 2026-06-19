@@ -378,6 +378,17 @@ void merge(PassConfig &dst, const PassConfig &src) {
     mergeOpt(dst.windows_kernel_debugger.enabled,
              src.windows_kernel_debugger.enabled);
     mergeOpt(dst.windows_syscalls.enabled, src.windows_syscalls.enabled);
+    mergeOpt(dst.platform_runtime.enabled, src.platform_runtime.enabled);
+    mergeOpt(dst.platform_runtime.direct_syscalls,
+             src.platform_runtime.direct_syscalls);
+    mergeOpt(dst.platform_runtime.windows_mode,
+             src.platform_runtime.windows_mode);
+    mergeOpt(dst.platform_runtime.per_build_stubs,
+             src.platform_runtime.per_build_stubs);
+    mergeOpt(dst.platform_runtime.minimize_imports,
+             src.platform_runtime.minimize_imports);
+    mergeOpt(dst.platform_runtime.import_table_audit,
+             src.platform_runtime.import_table_audit);
     mergeOpt(dst.windows_unhook.enabled, src.windows_unhook.enabled);
     mergeOpt(dst.windows_veh_audit.enabled, src.windows_veh_audit.enabled);
     mergeOpt(dst.windows_process_mitigations.enabled,

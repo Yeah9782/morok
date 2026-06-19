@@ -637,6 +637,7 @@ logic is not left as a simple native plaintext island.
 | Anti-debugging | `morok-antidbg` | `anti_debugging` | Layered POSIX debugger probes, watchdog cadence, direct syscalls where supported, Linux Landlock/seccomp/memfd re-exec/DR helper paths, macOS ptrace/sysctl/csops/Mach debug-state paths, and hidden-state folding. |
 | Anti-hooking | `morok-antihook` | `anti_hooking` | Clean-copy executable byte diff, prologue hook scan, function-window MACs, GOT/PLT or Mach-O fixup validation, W^X enforcement, address-space census, guarded pages, anti-dump, call-stack origin checks, method divergence, anti-VM/DBI heuristics, negative-space verification, and corroboration scoring. |
 | Anti-class-dump | `morok-antiacd` | `anti_class_dump` | Scrambles Objective-C metadata when present. |
+| Platform runtime | internal API | `platform_runtime` | Centralizes POSIX direct-syscall/libc fallback, Darwin direct anti-debug syscall, page-protection, file, and Windows runtime policy decisions for the anti-analysis producers. |
 | Timing oracle | `morok-timing` | `timing_oracles` | Samples short spans with independent clocks and folds slow/divergent distributions into private state. |
 | Scheduler-step oracle | `morok-step` | `scheduler_step_oracles` | Samples context-switch counters or thread-time/wall-clock skew over short spans and folds high-confidence anomalies into the anti-debug seal. |
 | Trap oracle | `morok-trap` | `trap_oracles` | Installs temporary trap handlers and checks trap delivery. |
@@ -777,6 +778,12 @@ page_fault_oracles
 cache_timing_oracles
 microarchitectural_canaries
 ```
+
+`platform_runtime` accepts `enabled`, `direct_syscalls` (`auto`, `always`,
+`never`), `windows_mode` (`documented_api`, `hashed_import`, `direct_syscall`),
+`per_build_stubs`, `minimize_imports`, and `import_table_audit`. The runtime is
+an internal emitter layer; these fields document and preset the platform policy
+used by anti-analysis producers rather than adding a standalone `-passes` entry.
 
 ## Platform Notes
 

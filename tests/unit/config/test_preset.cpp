@@ -390,6 +390,12 @@ TEST_CASE("high preset matches the documented table") {
     CHECK(c.func_wrap.probability == 20u);
     CHECK(c.func_wrap.times == 1u);
     CHECK(c.fco.enabled == true);
+    CHECK(c.platform_runtime.enabled == true);
+    CHECK(c.platform_runtime.direct_syscalls == "auto");
+    CHECK(c.platform_runtime.windows_mode == "hashed_import");
+    CHECK(c.platform_runtime.per_build_stubs == true);
+    CHECK(c.platform_runtime.minimize_imports == true);
+    CHECK(c.platform_runtime.import_table_audit == false);
 }
 
 TEST_CASE("max preset enables every pass at full intensity") {
@@ -462,6 +468,12 @@ TEST_CASE("max preset enables every pass at full intensity") {
     CHECK(c.windows_anti_attach.enabled == true);
     CHECK(c.windows_kernel_debugger.enabled == true);
     CHECK(c.windows_syscalls.enabled == true);
+    CHECK(c.platform_runtime.enabled == true);
+    CHECK(c.platform_runtime.direct_syscalls == "auto");
+    CHECK(c.platform_runtime.windows_mode == "direct_syscall");
+    CHECK(c.platform_runtime.per_build_stubs == true);
+    CHECK(c.platform_runtime.minimize_imports == true);
+    CHECK(c.platform_runtime.import_table_audit == true);
     CHECK(c.windows_unhook.enabled == true);
     CHECK(c.windows_veh_audit.enabled == true);
     CHECK(c.windows_process_mitigations.enabled == true);

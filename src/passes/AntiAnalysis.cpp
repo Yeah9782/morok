@@ -11,6 +11,7 @@
 
 #include "morok/ir/SymbolCloak.hpp"
 #include "morok/passes/RuntimeSeal.hpp"
+#include "morok/runtime/PlatformRuntime.hpp"
 
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -373,128 +374,45 @@ Value *arrayBytePtr(IRBuilderBase &B, ArrayType *ArrTy, Value *Base,
                                {ConstantInt::get(idxTy, 0), Index});
 }
 
-FunctionCallee ptraceDecl(Module &M) {
-    LLVMContext &ctx = M.getContext();
-    auto *i32 = Type::getInt32Ty(ctx);
-    auto *ptr = PointerType::getUnqual(ctx);
-    return M.getOrInsertFunction(
-        "ptrace", FunctionType::get(i32, {i32, i32, ptr, i32}, false));
-}
-
 Value *emitPtrace(IRBuilderBase &B, Module &M, int request) {
-    LLVMContext &ctx = M.getContext();
-    auto *i32 = Type::getInt32Ty(ctx);
-    auto *ptr = PointerType::getUnqual(ctx);
-    return B.CreateCall(ptraceDecl(M), {ConstantInt::getSigned(i32, request),
-                                        ConstantInt::get(i32, 0),
-                                        ConstantPointerNull::get(ptr),
-                                        ConstantInt::get(i32, 0)});
+    return runtime::emitPtraceImport(B, M, request);
 }
 
 bool useDirectLinuxSyscalls(const Triple &TT) {
-    return TT.isOSLinux() && TT.getArch() == Triple::x86_64;
-}
-
-Value *toSyscallArg(IRBuilderBase &B, Value *V) {
-    auto *ip = intPtrTy(*B.GetInsertBlock()->getModule());
-    if (V->getType()->isPointerTy())
-        return B.CreatePtrToInt(V, ip);
-    if (V->getType()->isIntegerTy())
-        return B.CreateSExtOrTrunc(V, ip);
-    return ConstantInt::get(ip, 0);
-}
-
-FunctionCallee syscallDecl(Module &M) {
-    auto *ip = intPtrTy(M);
-    return M.getOrInsertFunction("syscall", FunctionType::get(ip, {ip}, true));
+    return runtime::useDirectLinuxSyscalls(TT);
 }
 
 FunctionCallee getpidDecl(Module &M) {
-    return M.getOrInsertFunction(
-        "getpid", FunctionType::get(Type::getInt32Ty(M.getContext()), false));
+    return runtime::getpidDecl(M);
 }
 
 FunctionCallee getppidDecl(Module &M) {
-    return M.getOrInsertFunction(
-        "getppid", FunctionType::get(Type::getInt32Ty(M.getContext()), false));
+    return runtime::getppidDecl(M);
 }
 
 Value *emitLinuxSyscall(IRBuilder<> &B, Module &M, const Triple &TT,
                         std::uint32_t Number,
                         std::initializer_list<Value *> Args) {
-    auto *ip = intPtrTy(M);
-    std::array<Value *, 6> sysArgs = {
-        ConstantInt::get(ip, 0), ConstantInt::get(ip, 0),
-        ConstantInt::get(ip, 0), ConstantInt::get(ip, 0),
-        ConstantInt::get(ip, 0), ConstantInt::get(ip, 0)};
-    std::size_t i = 0;
-    for (Value *arg : Args) {
-        if (i >= sysArgs.size())
-            break;
-        sysArgs[i++] = toSyscallArg(B, arg);
-    }
-
-    if (useDirectLinuxSyscalls(TT)) {
-        std::vector<Type *> params(7, ip);
-        auto *asmTy = FunctionType::get(ip, params, false);
-        InlineAsm *syscall = InlineAsm::get(
-            asmTy, "syscall",
-            "={rax},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},~{rcx},~{r11},"
-            "~{memory},~{dirflag},~{fpsr},~{flags}",
-            /*hasSideEffects=*/true);
-        return B.CreateCall(asmTy, syscall,
-                            {ConstantInt::get(ip, Number), sysArgs[0],
-                             sysArgs[1], sysArgs[2], sysArgs[3], sysArgs[4],
-                             sysArgs[5]},
-                            "morok.linux.syscall");
-    }
-
-    return B.CreateCall(syscallDecl(M),
-                        {ConstantInt::get(ip, Number), sysArgs[0], sysArgs[1],
-                         sysArgs[2], sysArgs[3], sysArgs[4], sysArgs[5]},
-                        "morok.linux.syscall.wrap");
+    return runtime::emitLinuxSyscall(B, M, TT, Number, Args);
 }
 
 bool linuxCoreSyscalls(const Triple &TT, std::uint32_t &Ptrace,
                        std::uint32_t &Prctl, std::uint32_t &OpenAt,
                        std::uint32_t &Read, std::uint32_t &Close) {
-    switch (TT.getArch()) {
-    case Triple::x86_64:
-        Ptrace = 101;
-        Prctl = 157;
-        OpenAt = 257;
-        Read = 0;
-        Close = 3;
-        return true;
-    case Triple::aarch64:
-        Ptrace = 117;
-        Prctl = 167;
-        OpenAt = 56;
-        Read = 63;
-        Close = 57;
-        return true;
-    default:
+    runtime::LinuxCoreSyscalls sys;
+    if (!runtime::lookupLinuxCoreSyscalls(TT, sys))
         return false;
-    }
+    Ptrace = sys.ptrace;
+    Prctl = sys.prctl;
+    OpenAt = sys.openat;
+    Read = sys.read;
+    Close = sys.close;
+    return true;
 }
 
 Value *emitLinuxPtrace(IRBuilder<> &B, Module &M, const Triple &TT,
                        int request) {
-    std::uint32_t ptraceNr = 0;
-    std::uint32_t prctlNr = 0;
-    std::uint32_t openatNr = 0;
-    std::uint32_t readNr = 0;
-    std::uint32_t closeNr = 0;
-    if (!linuxCoreSyscalls(TT, ptraceNr, prctlNr, openatNr, readNr, closeNr))
-        return emitPtrace(B, M, request);
-    auto *i32 = Type::getInt32Ty(M.getContext());
-    auto *ip = intPtrTy(M);
-    auto *ptr = PointerType::getUnqual(M.getContext());
-    Value *rc = emitLinuxSyscall(
-        B, M, TT, ptraceNr,
-        {ConstantInt::getSigned(ip, request), ConstantInt::get(ip, 0),
-         ConstantPointerNull::get(ptr), ConstantInt::get(ip, 0)});
-    return B.CreateTruncOrBitCast(rc, i32);
+    return runtime::emitLinuxPtrace(B, M, TT, request);
 }
 
 void emitLinuxSelfTraceFallback(IRBuilder<> &B, Module &M,
@@ -537,31 +455,7 @@ Value *emitLinuxPrctl(IRBuilder<> &B, Module &M, const Triple &TT,
                       std::int64_t Option, std::int64_t A2 = 0,
                       std::int64_t A3 = 0, std::int64_t A4 = 0,
                       std::int64_t A5 = 0) {
-    std::uint32_t ptraceNr = 0;
-    std::uint32_t prctlNr = 0;
-    std::uint32_t openatNr = 0;
-    std::uint32_t readNr = 0;
-    std::uint32_t closeNr = 0;
-    if (!linuxCoreSyscalls(TT, ptraceNr, prctlNr, openatNr, readNr, closeNr)) {
-        auto *i32 = Type::getInt32Ty(M.getContext());
-        auto *ip = intPtrTy(M);
-        FunctionCallee prctl = M.getOrInsertFunction(
-            "prctl", FunctionType::get(i32, {i32, ip, ip, ip, ip}, false));
-        auto arg = [&](std::int64_t v) {
-            return ConstantInt::getSigned(ip, v);
-        };
-        return B.CreateCall(prctl, {ConstantInt::getSigned(i32, Option),
-                                    arg(A2), arg(A3), arg(A4), arg(A5)});
-    }
-
-    auto *i32 = Type::getInt32Ty(M.getContext());
-    auto *ip = intPtrTy(M);
-    Value *rc = emitLinuxSyscall(
-        B, M, TT, prctlNr,
-        {ConstantInt::getSigned(ip, Option), ConstantInt::getSigned(ip, A2),
-         ConstantInt::getSigned(ip, A3), ConstantInt::getSigned(ip, A4),
-         ConstantInt::getSigned(ip, A5)});
-    return B.CreateTruncOrBitCast(rc, i32);
+    return runtime::emitLinuxPrctl(B, M, TT, Option, A2, A3, A4, A5);
 }
 
 GlobalVariable *elfDynamicWeakSymbol(Module &M) {
@@ -583,154 +477,29 @@ Value *emitElfDynamicPresent(IRBuilder<> &B, Module &M, const Triple &TT) {
 }
 
 bool useDirectDarwinSyscalls(const Triple &TT) {
-    return TT.isOSDarwin() && TT.getArch() == Triple::x86_64;
-}
-
-// The raw `svc #0x80` (x16=number, args x0-x5, result x0; arg0 tied to the x0
-// output via the matching "0" constraint).  Kept in a single internal helper so
-// anti-debug checks avoid interposable libc syscall stubs without routing
-// through a mutable, import-built JIT thunk.
-Value *emitArm64SvcInlineAsm(IRBuilder<> &B, Module &M, Value *Nr,
-                             const std::array<Value *, 6> &A) {
-    auto *ip = intPtrTy(M);
-    std::vector<Type *> params(7, ip);
-    auto *asmTy = FunctionType::get(ip, params, false);
-    InlineAsm *svc = InlineAsm::get(
-        asmTy, "svc #0x80",
-        "={x0},{x16},0,{x1},{x2},{x3},{x4},{x5},~{memory},~{cc}",
-        /*hasSideEffects=*/true);
-    return B.CreateCall(asmTy, svc, {Nr, A[0], A[1], A[2], A[3], A[4], A[5]},
-                        "morok.darwin.svc");
-}
-
-Function *getOrCreateSvcFallback(Module &M) {
-    if (auto *F = M.getFunction("morok.svc.fallback"))
-        return F;
-    LLVMContext &ctx = M.getContext();
-    auto *ip = intPtrTy(M);
-    std::vector<Type *> params(7, ip);
-    auto *sysTy = FunctionType::get(ip, params, false);
-    Function *fb = Function::Create(sysTy, GlobalValue::InternalLinkage,
-                                    "morok.svc.fallback", &M);
-    fb->addFnAttr(Attribute::NoInline);
-    BasicBlock *bb = BasicBlock::Create(ctx, "entry", fb);
-    IRBuilder<> FB(bb);
-    auto ai = fb->arg_begin();
-    Value *nr = &*ai++;
-    std::array<Value *, 6> a{};
-    for (std::size_t k = 0; k < 6; ++k)
-        a[k] = &*ai++;
-    FB.CreateRet(emitArm64SvcInlineAsm(FB, M, nr, a));
-    return fb;
-}
-
-// Direct Darwin arm64 BSD syscall — used ONLY for the interposable anti-debug
-// checks (ptrace/sysctl/csops/getpid) so they cannot be DYLD-rebound, while
-// infra syscalls (mmap/mprotect/...) stay on their existing path.
-Value *emitDarwinArm64Svc(IRBuilder<> &B, Module &M, std::uint32_t Number,
-                          std::initializer_list<Value *> Args) {
-    auto *ip = intPtrTy(M);
-    std::array<Value *, 6> a = {ConstantInt::get(ip, 0), ConstantInt::get(ip, 0),
-                                ConstantInt::get(ip, 0), ConstantInt::get(ip, 0),
-                                ConstantInt::get(ip, 0), ConstantInt::get(ip, 0)};
-    std::size_t i = 0;
-    for (Value *arg : Args)
-        if (i < a.size())
-            a[i++] = toSyscallArg(B, arg);
-    Function *fallback = getOrCreateSvcFallback(M);
-    return B.CreateCall(fallback->getFunctionType(), fallback,
-                        {ConstantInt::get(ip, Number), a[0], a[1], a[2], a[3],
-                         a[4], a[5]},
-                        "morok.darwin.svc");
+    return runtime::useDirectDarwinSyscalls(TT);
 }
 
 Value *emitDarwinSyscall(IRBuilder<> &B, Module &M, const Triple &TT,
                          std::uint32_t Number,
                          std::initializer_list<Value *> Args) {
-    auto *ip = intPtrTy(M);
-    std::array<Value *, 6> sysArgs = {
-        ConstantInt::get(ip, 0), ConstantInt::get(ip, 0),
-        ConstantInt::get(ip, 0), ConstantInt::get(ip, 0),
-        ConstantInt::get(ip, 0), ConstantInt::get(ip, 0)};
-    std::size_t i = 0;
-    for (Value *arg : Args) {
-        if (i >= sysArgs.size())
-            break;
-        sysArgs[i++] = toSyscallArg(B, arg);
-    }
-
-    if (useDirectDarwinSyscalls(TT)) {
-        std::vector<Type *> params(7, ip);
-        auto *asmTy = FunctionType::get(ip, params, false);
-        InlineAsm *syscall = InlineAsm::get(
-            asmTy, "syscall\nsbbq %r11, %r11\norq %r11, %rax",
-            "={rax},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},~{rcx},~{r11},"
-            "~{memory},~{dirflag},~{fpsr},~{flags}",
-            /*hasSideEffects=*/true);
-        return B.CreateCall(asmTy, syscall,
-                            {ConstantInt::get(ip, 0x02000000U | Number),
-                             sysArgs[0], sysArgs[1], sysArgs[2], sysArgs[3],
-                             sysArgs[4], sysArgs[5]},
-                            "morok.darwin.syscall");
-    }
-
-    return B.CreateCall(syscallDecl(M),
-                        {ConstantInt::get(ip, Number), sysArgs[0], sysArgs[1],
-                         sysArgs[2], sysArgs[3], sysArgs[4], sysArgs[5]},
-                        "morok.darwin.syscall.wrap");
+    return runtime::emitDarwinSyscall(B, M, TT, Number, Args);
 }
 
 Value *emitDarwinGetpid(IRBuilder<> &B, Module &M, const Triple &TT) {
-    auto *i32 = Type::getInt32Ty(M.getContext());
-    if (useDirectDarwinSyscalls(TT))
-        return B.CreateTruncOrBitCast(emitDarwinSyscall(B, M, TT, 20, {}), i32);
-    if (TT.getArch() == Triple::aarch64)
-        return B.CreateTruncOrBitCast(emitDarwinArm64Svc(B, M, 20, {}), i32);
-    return B.CreateCall(getpidDecl(M));
+    return runtime::emitDarwinGetpid(B, M, TT);
 }
 
 Value *emitDarwinPtrace(IRBuilder<> &B, Module &M, const Triple &TT,
                         std::int32_t Request) {
-    auto *i32 = Type::getInt32Ty(M.getContext());
-    auto *ptr = PointerType::getUnqual(M.getContext());
-    if (useDirectDarwinSyscalls(TT))
-        return B.CreateTruncOrBitCast(
-            emitDarwinSyscall(
-                B, M, TT, 26,
-                {ConstantInt::getSigned(i32, Request), ConstantInt::get(i32, 0),
-                 ConstantPointerNull::get(ptr), ConstantInt::get(i32, 0)}),
-            i32);
-    if (TT.getArch() == Triple::aarch64)
-        return B.CreateTruncOrBitCast(
-            emitDarwinArm64Svc(
-                B, M, 26,
-                {ConstantInt::getSigned(i32, Request), ConstantInt::get(i32, 0),
-                 ConstantPointerNull::get(ptr), ConstantInt::get(i32, 0)}),
-            i32);
-    return emitPtrace(B, M, Request);
+    return runtime::emitDarwinPtrace(B, M, TT, Request);
 }
 
 Value *emitDarwinSysctl(IRBuilder<> &B, Module &M, const Triple &TT, Value *Mib,
                         Value *MibLen, Value *OldP, Value *OldLenP, Value *NewP,
                         Value *NewLen) {
-    auto *i32 = Type::getInt32Ty(M.getContext());
-    auto *ip = intPtrTy(M);
-    auto *ptr = PointerType::getUnqual(M.getContext());
-    if (useDirectDarwinSyscalls(TT))
-        return B.CreateTruncOrBitCast(
-            emitDarwinSyscall(B, M, TT, 202,
-                              {Mib, MibLen, OldP, OldLenP, NewP, NewLen}),
-            i32);
-    if (TT.getArch() == Triple::aarch64)
-        return B.CreateTruncOrBitCast(
-            emitDarwinArm64Svc(B, M, 202,
-                               {Mib, MibLen, OldP, OldLenP, NewP, NewLen}),
-            i32);
-    FunctionCallee sysctl = M.getOrInsertFunction(
-        "sysctl", FunctionType::get(i32, {ptr, i32, ptr, ptr, ptr, ip}, false));
-    return B.CreateCall(sysctl,
-                        {Mib, B.CreateTruncOrBitCast(MibLen, i32), OldP,
-                         OldLenP, NewP, B.CreateZExtOrTrunc(NewLen, ip)});
+    return runtime::emitDarwinSysctl(B, M, TT, Mib, MibLen, OldP, OldLenP, NewP,
+                                     NewLen);
 }
 
 Value *emitClockGettimeNanos(IRBuilder<> &B, Module &M, std::int32_t ClockId,
@@ -738,335 +507,88 @@ Value *emitClockGettimeNanos(IRBuilder<> &B, Module &M, std::int32_t ClockId,
 
 Value *emitDarwinCsops(IRBuilder<> &B, Module &M, const Triple &TT, Value *Pid,
                        Value *Ops, Value *UserAddr, Value *UserSize) {
-    auto *i32 = Type::getInt32Ty(M.getContext());
-    auto *ip = intPtrTy(M);
-    auto *ptr = PointerType::getUnqual(M.getContext());
-    if (useDirectDarwinSyscalls(TT))
-        return B.CreateTruncOrBitCast(
-            emitDarwinSyscall(B, M, TT, 169, {Pid, Ops, UserAddr, UserSize}),
-            i32);
-    if (TT.getArch() == Triple::aarch64)
-        return B.CreateTruncOrBitCast(
-            emitDarwinArm64Svc(B, M, 169, {Pid, Ops, UserAddr, UserSize}), i32);
-    FunctionCallee csops = M.getOrInsertFunction(
-        "csops", FunctionType::get(i32, {i32, i32, ptr, ip}, false));
-    return B.CreateCall(csops, {B.CreateTruncOrBitCast(Pid, i32),
-                                B.CreateTruncOrBitCast(Ops, i32), UserAddr,
-                                B.CreateZExtOrTrunc(UserSize, ip)});
+    return runtime::emitDarwinCsops(B, M, TT, Pid, Ops, UserAddr, UserSize);
 }
 
 FunctionCallee openDecl(Module &M) {
-    LLVMContext &ctx = M.getContext();
-    auto *i32 = Type::getInt32Ty(ctx);
-    auto *ptr = PointerType::getUnqual(ctx);
-    return M.getOrInsertFunction("open",
-                                 FunctionType::get(i32, {ptr, i32}, true));
+    return runtime::openDecl(M);
 }
 
 FunctionCallee readDecl(Module &M) {
-    LLVMContext &ctx = M.getContext();
-    auto *i32 = Type::getInt32Ty(ctx);
-    auto *ptr = PointerType::getUnqual(ctx);
-    auto *ip = intPtrTy(M);
-    return M.getOrInsertFunction("read",
-                                 FunctionType::get(ip, {i32, ptr, ip}, false));
+    return runtime::readDecl(M);
 }
 
 FunctionCallee closeDecl(Module &M) {
-    LLVMContext &ctx = M.getContext();
-    auto *i32 = Type::getInt32Ty(ctx);
-    return M.getOrInsertFunction("close", FunctionType::get(i32, {i32}, false));
-}
-
-FunctionCallee readlinkDecl(Module &M) {
-    LLVMContext &ctx = M.getContext();
-    auto *ptr = PointerType::getUnqual(ctx);
-    auto *ip = intPtrTy(M);
-    return M.getOrInsertFunction("readlink",
-                                 FunctionType::get(ip, {ptr, ptr, ip}, false));
-}
-
-FunctionCallee lseekDecl(Module &M) {
-    LLVMContext &ctx = M.getContext();
-    auto *i32 = Type::getInt32Ty(ctx);
-    auto *ip = intPtrTy(M);
-    return M.getOrInsertFunction("lseek",
-                                 FunctionType::get(ip, {i32, ip, i32}, false));
-}
-
-FunctionCallee mmapDecl(Module &M) {
-    LLVMContext &ctx = M.getContext();
-    auto *i32 = Type::getInt32Ty(ctx);
-    auto *ptr = PointerType::getUnqual(ctx);
-    auto *ip = intPtrTy(M);
-    return M.getOrInsertFunction(
-        "mmap", FunctionType::get(ptr, {ptr, ip, i32, i32, i32, ip}, false));
-}
-
-FunctionCallee munmapDecl(Module &M) {
-    LLVMContext &ctx = M.getContext();
-    auto *i32 = Type::getInt32Ty(ctx);
-    auto *ptr = PointerType::getUnqual(ctx);
-    auto *ip = intPtrTy(M);
-    return M.getOrInsertFunction("munmap",
-                                 FunctionType::get(i32, {ptr, ip}, false));
-}
-
-FunctionCallee mprotectDecl(Module &M) {
-    LLVMContext &ctx = M.getContext();
-    auto *i32 = Type::getInt32Ty(ctx);
-    auto *ptr = PointerType::getUnqual(ctx);
-    auto *ip = intPtrTy(M);
-    return M.getOrInsertFunction("mprotect",
-                                 FunctionType::get(i32, {ptr, ip, i32}, false));
-}
-
-bool linuxCleanCopySyscalls(const Triple &TT, std::uint32_t &Readlink,
-                            std::uint32_t &Lseek, std::uint32_t &Mmap,
-                            std::uint32_t &Munmap) {
-    switch (TT.getArch()) {
-    case Triple::x86_64:
-        Readlink = 89;
-        Lseek = 8;
-        Mmap = 9;
-        Munmap = 11;
-        return true;
-    default:
-        return false;
-    }
+    return runtime::closeDecl(M);
 }
 
 Value *emitLinuxReadlink(IRBuilder<> &B, Module &M, const Triple &TT,
                          Value *Path, Value *Buf, Value *Size) {
-    std::uint32_t readlinkNr = 0;
-    std::uint32_t lseekNr = 0;
-    std::uint32_t mmapNr = 0;
-    std::uint32_t munmapNr = 0;
-    if (useDirectLinuxSyscalls(TT) &&
-        linuxCleanCopySyscalls(TT, readlinkNr, lseekNr, mmapNr, munmapNr))
-        return emitLinuxSyscall(B, M, TT, readlinkNr, {Path, Buf, Size});
-    return B.CreateCall(readlinkDecl(M), {Path, Buf, Size},
-                        "morok.clean.readlink");
+    return runtime::emitLinuxReadlink(B, M, TT, Path, Buf, Size);
 }
 
 Value *emitLinuxLseek(IRBuilder<> &B, Module &M, const Triple &TT, Value *Fd,
                       std::int64_t Offset, std::int32_t Whence) {
-    std::uint32_t readlinkNr = 0;
-    std::uint32_t lseekNr = 0;
-    std::uint32_t mmapNr = 0;
-    std::uint32_t munmapNr = 0;
-    if (useDirectLinuxSyscalls(TT) &&
-        linuxCleanCopySyscalls(TT, readlinkNr, lseekNr, mmapNr, munmapNr))
-        return emitLinuxSyscall(
-            B, M, TT, lseekNr,
-            {Fd, constSignedIp(M, Offset),
-             ConstantInt::getSigned(Type::getInt32Ty(M.getContext()), Whence)});
-    return B.CreateCall(
-        lseekDecl(M),
-        {B.CreateTruncOrBitCast(Fd, Type::getInt32Ty(M.getContext())),
-         constSignedIp(M, Offset),
-         ConstantInt::getSigned(Type::getInt32Ty(M.getContext()), Whence)},
-        "morok.clean.lseek");
+    return runtime::emitLinuxLseek(B, M, TT, Fd, Offset, Whence);
 }
 
 Value *emitLinuxMmapAddr(IRBuilder<> &B, Module &M, const Triple &TT,
                          Value *Size, Value *Fd) {
-    LLVMContext &ctx = M.getContext();
-    auto *i32 = Type::getInt32Ty(ctx);
-    auto *ip = intPtrTy(M);
-    auto *ptr = PointerType::getUnqual(ctx);
-    constexpr std::uint32_t kProtRead = 1;
-    constexpr std::uint32_t kMapPrivate = 2;
-
-    std::uint32_t readlinkNr = 0;
-    std::uint32_t lseekNr = 0;
-    std::uint32_t mmapNr = 0;
-    std::uint32_t munmapNr = 0;
-    if (useDirectLinuxSyscalls(TT) &&
-        linuxCleanCopySyscalls(TT, readlinkNr, lseekNr, mmapNr, munmapNr))
-        return emitLinuxSyscall(B, M, TT, mmapNr,
-                                {ConstantPointerNull::get(ptr), Size,
-                                 ConstantInt::get(i32, kProtRead),
-                                 ConstantInt::get(i32, kMapPrivate), Fd,
-                                 ConstantInt::get(ip, 0)});
-
-    Value *mapped = B.CreateCall(
-        mmapDecl(M),
-        {ConstantPointerNull::get(ptr), Size, ConstantInt::get(i32, kProtRead),
-         ConstantInt::get(i32, kMapPrivate), B.CreateTruncOrBitCast(Fd, i32),
-         ConstantInt::get(ip, 0)},
-        "morok.clean.mmap");
-    return B.CreatePtrToInt(mapped, ip);
+    return runtime::emitLinuxMmapAddr(B, M, TT, Size, Fd);
 }
 
 void emitLinuxMunmap(IRBuilder<> &B, Module &M, const Triple &TT, Value *Addr,
                      Value *Size) {
-    std::uint32_t readlinkNr = 0;
-    std::uint32_t lseekNr = 0;
-    std::uint32_t mmapNr = 0;
-    std::uint32_t munmapNr = 0;
-    if (useDirectLinuxSyscalls(TT) &&
-        linuxCleanCopySyscalls(TT, readlinkNr, lseekNr, mmapNr, munmapNr)) {
-        emitLinuxSyscall(B, M, TT, munmapNr, {Addr, Size});
-        return;
-    }
-    B.CreateCall(
-        munmapDecl(M),
-        {B.CreateIntToPtr(Addr, PointerType::getUnqual(M.getContext())), Size});
+    runtime::emitLinuxMunmap(B, M, TT, Addr, Size);
 }
 
 Value *emitLinuxMprotect(IRBuilder<> &B, Module &M, const Triple &TT,
                          Value *Addr, Value *Size, Value *Prot) {
-    std::uint32_t mprotectNr = 0;
-    if (TT.getArch() == Triple::x86_64)
-        mprotectNr = 10;
-    if (useDirectLinuxSyscalls(TT) && mprotectNr != 0)
-        return B.CreateTruncOrBitCast(
-            emitLinuxSyscall(B, M, TT, mprotectNr, {Addr, Size, Prot}),
-            Type::getInt32Ty(M.getContext()));
-
-    auto *i32 = Type::getInt32Ty(M.getContext());
-    auto *ptr = PointerType::getUnqual(M.getContext());
-    return B.CreateCall(mprotectDecl(M), {B.CreateIntToPtr(Addr, ptr), Size,
-                                          B.CreateTruncOrBitCast(Prot, i32)});
+    return runtime::emitLinuxMprotect(B, M, TT, Addr, Size, Prot);
 }
 
 Value *emitDarwinMprotect(IRBuilder<> &B, Module &M, const Triple &TT,
                           Value *Addr, Value *Size, Value *Prot) {
-    auto *i32 = Type::getInt32Ty(M.getContext());
-    if (useDirectDarwinSyscalls(TT))
-        return B.CreateTruncOrBitCast(
-            emitDarwinSyscall(B, M, TT, 74, {Addr, Size, Prot}), i32);
-
-    auto *ptr = PointerType::getUnqual(M.getContext());
-    return B.CreateCall(mprotectDecl(M), {B.CreateIntToPtr(Addr, ptr), Size,
-                                          B.CreateTruncOrBitCast(Prot, i32)});
+    return runtime::emitDarwinMprotect(B, M, TT, Addr, Size, Prot);
 }
 
 void emitLinuxClose(IRBuilder<> &B, Module &M, const Triple &TT, Value *Fd) {
-    std::uint32_t ptraceNr = 0;
-    std::uint32_t prctlNr = 0;
-    std::uint32_t openatNr = 0;
-    std::uint32_t readNr = 0;
-    std::uint32_t closeNr = 0;
-    if (linuxCoreSyscalls(TT, ptraceNr, prctlNr, openatNr, readNr, closeNr)) {
-        emitLinuxSyscall(B, M, TT, closeNr, {Fd});
-        return;
-    }
-    B.CreateCall(closeDecl(M), {B.CreateTruncOrBitCast(
-                                   Fd, Type::getInt32Ty(M.getContext()))});
+    runtime::emitLinuxClose(B, M, TT, Fd);
 }
 
 Value *emitDarwinOpen(IRBuilder<> &B, Module &M, const Triple &TT, Value *Path,
                       std::int32_t Flags, std::int32_t Mode) {
-    auto *i32 = Type::getInt32Ty(M.getContext());
-    if (useDirectDarwinSyscalls(TT))
-        return B.CreateTruncOrBitCast(
-            emitDarwinSyscall(B, M, TT, 5,
-                              {Path, ConstantInt::getSigned(i32, Flags),
-                               ConstantInt::getSigned(i32, Mode)}),
-            i32);
-    return B.CreateCall(openDecl(M),
-                        {Path, ConstantInt::getSigned(i32, Flags),
-                         ConstantInt::getSigned(i32, Mode)},
-                        "morok.clean.open");
+    return runtime::emitDarwinOpen(B, M, TT, Path, Flags, Mode);
 }
 
 void emitDarwinClose(IRBuilder<> &B, Module &M, const Triple &TT, Value *Fd) {
-    if (useDirectDarwinSyscalls(TT)) {
-        emitDarwinSyscall(B, M, TT, 6, {Fd});
-        return;
-    }
-    B.CreateCall(closeDecl(M), {B.CreateTruncOrBitCast(
-                                   Fd, Type::getInt32Ty(M.getContext()))});
+    runtime::emitDarwinClose(B, M, TT, Fd);
 }
 
 Value *emitDarwinLseek(IRBuilder<> &B, Module &M, const Triple &TT, Value *Fd,
                        std::int64_t Offset, std::int32_t Whence) {
-    auto *i32 = Type::getInt32Ty(M.getContext());
-    if (useDirectDarwinSyscalls(TT))
-        return emitDarwinSyscall(B, M, TT, 199,
-                                 {Fd, constSignedIp(M, Offset),
-                                  ConstantInt::getSigned(i32, Whence)});
-    return B.CreateCall(lseekDecl(M),
-                        {B.CreateTruncOrBitCast(Fd, i32),
-                         constSignedIp(M, Offset),
-                         ConstantInt::getSigned(i32, Whence)},
-                        "morok.clean.lseek");
+    return runtime::emitDarwinLseek(B, M, TT, Fd, Offset, Whence);
 }
 
 Value *emitDarwinMmap(IRBuilder<> &B, Module &M, const Triple &TT, Value *Size,
                       Value *Fd) {
-    LLVMContext &ctx = M.getContext();
-    auto *i32 = Type::getInt32Ty(ctx);
-    auto *ip = intPtrTy(M);
-    auto *ptr = PointerType::getUnqual(ctx);
-    constexpr std::uint32_t kProtRead = 1;
-    constexpr std::uint32_t kMapPrivate = 2;
-
-    if (useDirectDarwinSyscalls(TT)) {
-        Value *addr = emitDarwinSyscall(B, M, TT, 197,
-                                        {ConstantPointerNull::get(ptr), Size,
-                                         ConstantInt::get(i32, kProtRead),
-                                         ConstantInt::get(i32, kMapPrivate), Fd,
-                                         ConstantInt::get(ip, 0)});
-        return B.CreateIntToPtr(addr, ptr, "morok.clean.mmap.ptr");
-    }
-
-    return B.CreateCall(
-        mmapDecl(M),
-        {ConstantPointerNull::get(ptr), Size, ConstantInt::get(i32, kProtRead),
-         ConstantInt::get(i32, kMapPrivate), B.CreateTruncOrBitCast(Fd, i32),
-         ConstantInt::get(ip, 0)},
-        "morok.clean.mmap");
+    return runtime::emitDarwinMmap(B, M, TT, Size, Fd);
 }
 
 Value *emitPosixAnonMmapAddr(IRBuilder<> &B, Module &M, const Triple &TT,
                              Value *Size, Value *Prot, Value *Flags,
                              const Twine &Name) {
-    LLVMContext &ctx = M.getContext();
-    auto *i32 = Type::getInt32Ty(ctx);
-    auto *ip = intPtrTy(M);
-    auto *ptr = PointerType::getUnqual(ctx);
-    if (TT.isOSLinux() && useDirectLinuxSyscalls(TT))
-        return emitLinuxSyscall(B, M, TT, 9,
-                                {ConstantPointerNull::get(ptr), Size, Prot,
-                                 Flags, ConstantInt::getSigned(i32, -1),
-                                 ConstantInt::get(ip, 0)});
-    if (TT.isOSDarwin() && useDirectDarwinSyscalls(TT))
-        return emitDarwinSyscall(B, M, TT, 197,
-                                 {ConstantPointerNull::get(ptr), Size, Prot,
-                                  Flags, ConstantInt::getSigned(i32, -1),
-                                  ConstantInt::get(ip, 0)});
-
-    Value *mapped = B.CreateCall(
-        mmapDecl(M),
-        {ConstantPointerNull::get(ptr), Size, B.CreateTruncOrBitCast(Prot, i32),
-         B.CreateTruncOrBitCast(Flags, i32), ConstantInt::getSigned(i32, -1),
-         ConstantInt::get(ip, 0)},
-        Name);
-    return B.CreatePtrToInt(mapped, ip, Name + ".addr");
+    return runtime::emitPosixAnonMmapAddr(B, M, TT, Size, Prot, Flags, Name);
 }
 
 Value *emitPosixMprotect(IRBuilder<> &B, Module &M, const Triple &TT,
                          Value *Addr, Value *Size, Value *Prot) {
-    if (TT.isOSLinux())
-        return emitLinuxMprotect(B, M, TT, Addr, Size, Prot);
-    if (TT.isOSDarwin())
-        return emitDarwinMprotect(B, M, TT, Addr, Size, Prot);
-    return B.CreateCall(
-        mprotectDecl(M),
-        {B.CreateIntToPtr(Addr, PointerType::getUnqual(M.getContext())), Size,
-         B.CreateTruncOrBitCast(Prot, Type::getInt32Ty(M.getContext()))});
+    return runtime::emitPosixMprotect(B, M, TT, Addr, Size, Prot);
 }
 
 void emitDarwinMunmap(IRBuilder<> &B, Module &M, const Triple &TT,
                       Value *Mapped, Value *Size) {
-    if (useDirectDarwinSyscalls(TT)) {
-        emitDarwinSyscall(B, M, TT, 73, {Mapped, Size});
-        return;
-    }
-    B.CreateCall(munmapDecl(M), {Mapped, Size});
+    runtime::emitDarwinMunmap(B, M, TT, Mapped, Size);
 }
 
 struct ReadFileIR {

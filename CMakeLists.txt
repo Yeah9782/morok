@@ -86,6 +86,7 @@ if(MOROK_BUILD_PLUGIN OR MOROK_BUILD_TESTS)
   include(MorokLLVM)            # discovers LLVM, validates the plugin API
   if(Morok_LLVM_FOUND)
     morok_add_layer(src/ir)
+    morok_add_layer(src/runtime)
     morok_add_layer(src/passes)
     morok_add_layer(src/pipeline)
   else()

@@ -7,6 +7,7 @@
 #include "morok/passes/TracerAttestation.hpp"
 
 #include "morok/passes/RuntimeSeal.hpp"
+#include "morok/runtime/PlatformRuntime.hpp"
 
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/Attributes.h"
@@ -14,17 +15,14 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
 #include <algorithm>
-#include <array>
 #include <cstdint>
 #include <initializer_list>
-#include <vector>
 
 using namespace llvm;
 
@@ -81,47 +79,14 @@ bool supportsDirectTracer(const Triple &TT) {
 }
 
 IntegerType *intPtrTy(Module &M) {
-    unsigned Bits = M.getDataLayout().getPointerSizeInBits(0);
-    if (Bits == 0)
-        Bits = 64;
-    return IntegerType::get(M.getContext(), Bits);
-}
-
-Value *toSyscallArg(IRBuilderBase &B, Value *V) {
-    auto *IP = intPtrTy(*B.GetInsertBlock()->getModule());
-    if (V->getType()->isPointerTy())
-        return B.CreatePtrToInt(V, IP);
-    if (V->getType()->isIntegerTy())
-        return B.CreateSExtOrTrunc(V, IP);
-    return ConstantInt::get(IP, 0);
+    return runtime::platformWordTy(M);
 }
 
 Value *emitLinuxSyscall(IRBuilder<> &B, Module &M, std::uint32_t Number,
                         std::initializer_list<Value *> Args,
                         const Twine &Name) {
-    auto *IP = intPtrTy(M);
-    std::array<Value *, 6> SysArgs = {
-        ConstantInt::get(IP, 0), ConstantInt::get(IP, 0),
-        ConstantInt::get(IP, 0), ConstantInt::get(IP, 0),
-        ConstantInt::get(IP, 0), ConstantInt::get(IP, 0)};
-    std::size_t I = 0;
-    for (Value *Arg : Args) {
-        if (I >= SysArgs.size())
-            break;
-        SysArgs[I++] = toSyscallArg(B, Arg);
-    }
-
-    std::vector<Type *> Params(7, IP);
-    auto *AsmTy = FunctionType::get(IP, Params, false);
-    InlineAsm *Syscall = InlineAsm::get(
-        AsmTy, "syscall",
-        "={rax},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},~{rcx},~{r11},"
-        "~{memory},~{dirflag},~{fpsr},~{flags}",
-        /*hasSideEffects=*/true);
-    return B.CreateCall(AsmTy, Syscall,
-                        {ConstantInt::get(IP, Number), SysArgs[0], SysArgs[1],
-                         SysArgs[2], SysArgs[3], SysArgs[4], SysArgs[5]},
-                        Name);
+    return runtime::emitLinuxSyscall(B, M, Triple(M.getTargetTriple()), Number,
+                                     Args, Name);
 }
 
 Value *emitPtrace(IRBuilder<> &B, Module &M, std::uint32_t Request, Value *Pid,

@@ -240,6 +240,12 @@ TEST_CASE("merge handles every pass family") {
     src.windows_anti_attach.enabled = true;
     src.windows_kernel_debugger.enabled = true;
     src.windows_syscalls.enabled = true;
+    src.platform_runtime.enabled = true;
+    src.platform_runtime.direct_syscalls = "auto";
+    src.platform_runtime.windows_mode = "direct_syscall";
+    src.platform_runtime.per_build_stubs = true;
+    src.platform_runtime.minimize_imports = true;
+    src.platform_runtime.import_table_audit = true;
     src.windows_unhook.enabled = true;
     src.windows_veh_audit.enabled = true;
     src.windows_process_mitigations.enabled = true;
@@ -427,6 +433,12 @@ TEST_CASE("merge handles every pass family") {
     CHECK(dst.windows_anti_attach.enabled == true);
     CHECK(dst.windows_kernel_debugger.enabled == true);
     CHECK(dst.windows_syscalls.enabled == true);
+    CHECK(dst.platform_runtime.enabled == true);
+    CHECK(dst.platform_runtime.direct_syscalls == "auto");
+    CHECK(dst.platform_runtime.windows_mode == "direct_syscall");
+    CHECK(dst.platform_runtime.per_build_stubs == true);
+    CHECK(dst.platform_runtime.minimize_imports == true);
+    CHECK(dst.platform_runtime.import_table_audit == true);
     CHECK(dst.windows_unhook.enabled == true);
     CHECK(dst.windows_veh_audit.enabled == true);
     CHECK(dst.windows_process_mitigations.enabled == true);

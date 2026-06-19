@@ -64,6 +64,7 @@
 #include "morok/passes/VectorObfuscation.hpp"
 #include "morok/passes/Virtualization.hpp"
 #include "morok/pipeline/Scheduler.hpp"
+#include "morok/runtime/PlatformRuntime.hpp"
 
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -523,6 +524,77 @@ std::size_t countInlineAsmConstraints(Function &F, StringRef needle) {
                 if (Asm->getConstraintString().contains(needle))
                     ++n;
     return n;
+}
+
+std::size_t countInlineAsmBodies(Function &F, StringRef needle) {
+    std::size_t n = 0;
+    for (Instruction &I : instructions(F))
+        if (auto *CB = dyn_cast<CallBase>(&I))
+            if (auto *Asm = dyn_cast<InlineAsm>(CB->getCalledOperand()))
+                if (Asm->getAsmString().contains(needle))
+                    ++n;
+    return n;
+}
+
+TEST_CASE("PlatformRuntime emits direct Linux syscalls without libc import") {
+    LLVMContext ctx;
+    Module M("platform-runtime-linux", ctx);
+    M.setTargetTriple(Triple("x86_64-unknown-linux-gnu"));
+    auto *I32 = Type::getInt32Ty(ctx);
+    auto *F = Function::Create(FunctionType::get(I32, false),
+                               GlobalValue::ExternalLinkage, "probe", M);
+    BasicBlock *BB = BasicBlock::Create(ctx, "entry", F);
+    IRBuilder<> B(BB);
+    Value *Rc = morok::runtime::emitLinuxSyscall(
+        B, M, Triple(M.getTargetTriple()), 39, {}, "morok.platform.getpid");
+    B.CreateRet(B.CreateTruncOrBitCast(Rc, I32));
+
+    CHECK(hasInlineAsmCall(*F));
+    CHECK(countInlineAsmBodies(*F, "syscall") == 1u);
+    CHECK(countInlineAsmConstraints(*F, "~{rcx}") == 1u);
+    CHECK(countNamedInstructions(*F, "morok.platform.getpid") == 1u);
+    CHECK(M.getFunction("syscall") == nullptr);
+    CHECK_FALSE(verifyModule(M, &errs()));
+}
+
+TEST_CASE("PlatformRuntime falls back to libc syscall on unsupported Linux arch") {
+    LLVMContext ctx;
+    Module M("platform-runtime-linux-fallback", ctx);
+    M.setTargetTriple(Triple("aarch64-unknown-linux-gnu"));
+    auto *IP = morok::runtime::platformWordTy(M);
+    auto *F = Function::Create(FunctionType::get(IP, false),
+                               GlobalValue::ExternalLinkage, "probe", M);
+    BasicBlock *BB = BasicBlock::Create(ctx, "entry", F);
+    IRBuilder<> B(BB);
+    Value *Rc = morok::runtime::emitLinuxSyscall(
+        B, M, Triple(M.getTargetTriple()), 117, {}, "morok.platform.ptrace");
+    B.CreateRet(Rc);
+
+    CHECK_FALSE(hasInlineAsmCall(*F));
+    REQUIRE(M.getFunction("syscall") != nullptr);
+    CHECK(countCallsTo(*F, "syscall") == 1u);
+    CHECK(countNamedInstructions(*F, "morok.platform.ptrace.wrap") == 1u);
+    CHECK_FALSE(verifyModule(M, &errs()));
+}
+
+TEST_CASE("PlatformRuntime keeps Darwin anti-debug syscalls off libSystem") {
+    LLVMContext ctx;
+    Module M("platform-runtime-darwin", ctx);
+    M.setTargetTriple(Triple("x86_64-apple-macosx13.0.0"));
+    auto *I32 = Type::getInt32Ty(ctx);
+    auto *F = Function::Create(FunctionType::get(I32, false),
+                               GlobalValue::ExternalLinkage, "probe", M);
+    BasicBlock *BB = BasicBlock::Create(ctx, "entry", F);
+    IRBuilder<> B(BB);
+    Value *Rc =
+        morok::runtime::emitDarwinGetpid(B, M, Triple(M.getTargetTriple()));
+    B.CreateRet(B.CreateTruncOrBitCast(Rc, I32));
+
+    CHECK(hasInlineAsmCall(*F));
+    CHECK(countInlineAsmBodies(*F, "sbbq %r11") == 1u);
+    CHECK(M.getFunction("syscall") == nullptr);
+    CHECK(M.getFunction("getpid") == nullptr);
+    CHECK_FALSE(verifyModule(M, &errs()));
 }
 
 bool valueDependsOnOpaqueBarrier(Value *V) {

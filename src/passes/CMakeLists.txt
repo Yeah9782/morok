@@ -67,5 +67,5 @@ target_compile_features(morok_passes PUBLIC cxx_std_23)
 target_include_directories(morok_passes PUBLIC
   "${PROJECT_SOURCE_DIR}/include")
 target_link_libraries(morok_passes
-  PUBLIC morok::core morok::ir morok::llvm
+  PUBLIC morok::core morok::ir morok::runtime morok::llvm
   PRIVATE morok::warnings morok::no_eh_rtti)

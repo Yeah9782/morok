@@ -377,6 +377,15 @@ struct ToggleConfig {
     Opt<bool> enabled;
 };
 
+struct PlatformRuntimeConfig {
+    Opt<bool> enabled;
+    Opt<std::string> direct_syscalls; // auto | always | never
+    Opt<std::string> windows_mode; // documented_api | hashed_import | direct_syscall
+    Opt<bool> per_build_stubs;
+    Opt<bool> minimize_imports;
+    Opt<bool> import_table_audit;
+};
+
 /// The full set of per-pass options.
 struct PassConfig {
     BcfConfig bcf;
@@ -436,6 +445,7 @@ struct PassConfig {
     ToggleConfig windows_anti_attach;
     ToggleConfig windows_kernel_debugger;
     ToggleConfig windows_syscalls;
+    PlatformRuntimeConfig platform_runtime;
     ToggleConfig windows_unhook;
     ToggleConfig windows_veh_audit;
     ToggleConfig windows_process_mitigations;

@@ -418,6 +418,15 @@ void parseCsm(const toml::table &t, CsmConfig &c) {
     c.warmup = readU32(t["warmup"]);
 }
 
+void parsePlatformRuntime(const toml::table &t, PlatformRuntimeConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.direct_syscalls = readString(t["direct_syscalls"]);
+    c.windows_mode = readString(t["windows_mode"]);
+    c.per_build_stubs = readBool(t["per_build_stubs"]);
+    c.minimize_imports = readBool(t["minimize_imports"]);
+    c.import_table_audit = readBool(t["import_table_audit"]);
+}
+
 void parseFuncWrap(const toml::table &t, PassConfig::FuncWrapConfig &c) {
     c.enabled = readBool(t["enabled"]);
     c.probability = readU32(t["probability"]);
@@ -545,6 +554,8 @@ void parsePasses(const toml::table &p, PassConfig &pc) {
         parseToggle(*t, pc.windows_kernel_debugger);
     if (auto *t = p["windows_syscalls"].as_table())
         parseToggle(*t, pc.windows_syscalls);
+    if (auto *t = p["platform_runtime"].as_table())
+        parsePlatformRuntime(*t, pc.platform_runtime);
     if (auto *t = p["windows_unhook"].as_table())
         parseToggle(*t, pc.windows_unhook);
     if (auto *t = p["windows_veh_audit"].as_table())
