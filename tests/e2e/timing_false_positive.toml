@@ -1,0 +1,21 @@
+[global]
+preset = "none"
+
+[passes.sealed_blob]
+enabled = true
+max_blobs = 1
+max_blob_bytes = 64
+key_sources = ["runtime_seal"]
+delivery = "eager"
+zeroize_after_use = true
+runtime_keyed_magic = true
+magic_bytes = 4
+
+[passes.timing_oracles]
+enabled = true
+
+[passes.cache_timing_oracles]
+enabled = true
+
+[passes.microarchitectural_canaries]
+enabled = true

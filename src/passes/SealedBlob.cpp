@@ -129,7 +129,10 @@ Value *emitRuntimeTagByte(IRBuilderBase &B, const BlobPlan &Plan, Value *Seed,
 }
 
 bool selected(const GlobalVariable &GV) {
-    return GV.getSection() == kSection ||
+    StringRef Section = GV.getSection();
+    // Mach-O section attributes are segment-qualified (for example
+    // "__DATA,.morok.sealed"), while ELF/IR tests use the bare section name.
+    return Section == kSection || Section.ends_with(",.morok.sealed") ||
            (GV.getName().starts_with(kSelectedPrefix) &&
             !GV.getName().starts_with(kCipherPrefix));
 }

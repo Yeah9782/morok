@@ -55,6 +55,12 @@ set(_dr_sentinel_fallback_config
     "${CMAKE_CURRENT_SOURCE_DIR}/dr_sentinel_fallback.toml")
 set(_dr_sentinel_fallback_workload
     "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/dr_sentinel_fallback.c")
+set(_timing_false_positive_driver
+    "${CMAKE_CURRENT_SOURCE_DIR}/timing_false_positive_clean_run.sh")
+set(_timing_false_positive_config
+    "${CMAKE_CURRENT_SOURCE_DIR}/timing_false_positive.toml")
+set(_timing_false_positive_workload
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/timing_false_positive.c")
 set(_release_audit_driver
     "${CMAKE_CURRENT_SOURCE_DIR}/release_audit_test.py")
 set(_vtable_integrity_driver
@@ -399,6 +405,20 @@ set_tests_properties("e2e/vtable_integrity_dispatch" PROPERTIES
   LABELS "e2e;security"
   REQUIRED_FILES
     "$<TARGET_FILE:morok_plugin>;${_vtable_integrity_driver};${_vtable_integrity_config};${_vtable_integrity_workload}"
+  TIMEOUT 120)
+
+add_test(NAME "e2e/timing_false_positive_clean_run"
+  COMMAND bash "${_timing_false_positive_driver}"
+          "${CMAKE_C_COMPILER}"
+          "$<TARGET_FILE:morok_plugin>"
+          "${_sysroot}"
+          "${_timing_false_positive_workload}"
+          "${_timing_false_positive_config}"
+          1818)
+set_tests_properties("e2e/timing_false_positive_clean_run" PROPERTIES
+  LABELS "e2e;security"
+  REQUIRED_FILES
+    "$<TARGET_FILE:morok_plugin>;${_timing_false_positive_driver};${_timing_false_positive_config};${_timing_false_positive_workload}"
   TIMEOUT 120)
 
 # The full sample-program compile sweep runs only when the corpus is present.
