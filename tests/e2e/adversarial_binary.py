@@ -682,22 +682,15 @@ def resign_macho(binary: "Binary", path: Path) -> None:
 def sealed_code_len(
     target_seg: Segment,
     target: int,
-    configured_region_size: int,
     window: int,
-    cover_timing_stubs: bool,
 ) -> int:
     seg_end_addr = target_seg.vmaddr + target_seg.filesize
-    available = max(0, min(window, seg_end_addr - target))
-    if cover_timing_stubs:
-        return available
-    # Keep the normal sealed runtime hash bounded by the pass' configured
-    # native region size. Hot functions may call the diff helper thousands of
-    # times; sealing the whole remaining text segment makes intact binaries
-    # spend most of their time rehashing unrelated code.
-    return max(0, min(configured_region_size, available))
+    return max(0, min(window, seg_end_addr - target))
 
 
 def seal(path: Path, window: int, cover_timing_stubs: bool = False) -> int:
+    # Backward-compatible flag: full `--window` coverage is now the default.
+    _ = cover_timing_stubs
     binary = Binary(path)
     manifests = binary.find_sc_manifests()
     sealed_sc = 0
@@ -717,9 +710,7 @@ def seal(path: Path, window: int, cover_timing_stubs: bool = False) -> int:
             or code_size_off is None
         ):
             continue
-        code_len = sealed_code_len(
-            target_seg, m.target, m.region_size, window, cover_timing_stubs
-        )
+        code_len = sealed_code_len(target_seg, m.target, window)
         if code_len <= 0:
             continue
         code = bytes(binary.data[target_off : target_off + code_len])
@@ -748,13 +739,7 @@ def seal(path: Path, window: int, cover_timing_stubs: bool = False) -> int:
                 or native_expected_off is None
             ):
                 continue
-            code_len = sealed_code_len(
-                target_seg,
-                node.target,
-                manifest.region_size,
-                window,
-                cover_timing_stubs,
-            )
+            code_len = sealed_code_len(target_seg, node.target, window)
             if code_len <= 0 or code_len == MG_UNSEALED_CODE_SIZE:
                 continue
             code = bytes(binary.data[target_off : target_off + code_len])
@@ -885,6 +870,56 @@ def patch_code_at(binary: Binary, target: int, label: str) -> int:
     return 0
 
 
+def patch_neutral_code_beyond(
+    binary: Binary,
+    target: int,
+    region_size: int,
+    code_size: int,
+    label: str,
+) -> int:
+    min_delta = region_size + 16
+    target_off = binary.fileoff_for_addr(target)
+    if target_off is None:
+        print(f"{label} target is not file-backed", file=sys.stderr)
+        return 1
+    if code_size <= min_delta:
+        print(
+            f"{label} sealed code window too small for far patch "
+            f"(region_size={region_size} code_size={code_size})",
+            file=sys.stderr,
+        )
+        return 1
+
+    start = min(len(binary.data), target_off + min_delta)
+    end = min(len(binary.data), target_off + code_size)
+    if binary.arch == "x86_64":
+        for off in range(start, max(start, end - 1)):
+            if binary.data[off] == 0x90 and binary.data[off + 1] == 0x90:
+                binary.data[off] = 0x66
+                print(
+                    f"patched neutral {label} code byte at "
+                    f"target=0x{target + (off - target_off):x}"
+                )
+                return 0
+        print(f"no neutral x86_64 NOP pair found for {label}", file=sys.stderr)
+        return 1
+    if binary.arch == "arm64":
+        nop = b"\x1f\x20\x03\xd5"
+        yield_hint = b"\x3f\x20\x03\xd5"
+        for off in range(start, max(start, end - 3)):
+            if (off - target_off) % 4 == 0 and binary.data[off : off + 4] == nop:
+                binary.data[off : off + 4] = yield_hint
+                print(
+                    f"patched neutral {label} code word at "
+                    f"target=0x{target + (off - target_off):x}"
+                )
+                return 0
+        print(f"no neutral arm64 NOP found for {label}", file=sys.stderr)
+        return 1
+    print(f"unsupported architecture for neutral code patch: {binary.arch}", file=sys.stderr)
+    return 77
+
+
 def patch_selfcheck_code(path: Path) -> int:
     binary = Binary(path)
     manifests = binary.find_sc_manifests()
@@ -896,6 +931,40 @@ def patch_selfcheck_code(path: Path) -> int:
         return rc
     binary.write()
     return 0
+
+
+def patch_selfcheck_code_far(path: Path) -> int:
+    binary = Binary(path)
+    manifests = binary.find_sc_manifests()
+    if not manifests:
+        print("no self-check manifests to patch", file=sys.stderr)
+        return 1
+    unsupported = False
+    patched = 0
+    for manifest in manifests:
+        code_size_off = binary.fileoff_for_addr(manifest.code_size)
+        if code_size_off is None:
+            continue
+        code_size = binary.u32(code_size_off)
+        rc = patch_neutral_code_beyond(
+            binary,
+            manifest.target,
+            manifest.region_size,
+            code_size,
+            "self-check far",
+        )
+        if rc == 0:
+            patched += 1
+            continue
+        unsupported |= rc == 77
+    if patched:
+        binary.write()
+        print(f"patched neutral self-check far code windows={patched}")
+        return 0
+    if unsupported:
+        return 77
+    print("no self-check manifest had a patchable far neutral code byte", file=sys.stderr)
+    return 1
 
 
 def patch_mutualguard_code(path: Path) -> int:
@@ -1065,6 +1134,8 @@ def main(argv: list[str]) -> int:
 
     p_code = sub.add_parser("patch-selfcheck-code")
     p_code.add_argument("binary", type=Path)
+    p_code_far = sub.add_parser("patch-selfcheck-code-far")
+    p_code_far.add_argument("binary", type=Path)
 
     p_mg_code = sub.add_parser("patch-mutualguard-code")
     p_mg_code.add_argument("binary", type=Path)
@@ -1088,6 +1159,8 @@ def main(argv: list[str]) -> int:
         return seal(args.binary, args.window, args.cover_timing_stubs)
     if args.cmd == "patch-selfcheck-code":
         return patch_selfcheck_code(args.binary)
+    if args.cmd == "patch-selfcheck-code-far":
+        return patch_selfcheck_code_far(args.binary)
     if args.cmd == "patch-mutualguard-code":
         return patch_mutualguard_code(args.binary)
     if args.cmd == "patch-ckd-code":

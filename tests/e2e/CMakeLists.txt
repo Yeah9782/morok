@@ -204,6 +204,26 @@ if(APPLE AND Python3_EXECUTABLE)
       "$<TARGET_FILE:morok_plugin>;${_adversarial_driver};${_adversarial_config};${_adversarial_workload}"
     TIMEOUT 120)
 
+  # Regression for #107: default release sealing must cover the requested
+  # code window, not just the small self-check random-data region. The patch
+  # mutates neutral padding beyond region_size so only the sealed code hash
+  # should make the patched binary diverge.
+  add_test(NAME "e2e/adversarial_selfcheck_far_code_patch"
+    COMMAND bash "${_adversarial_driver}"
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_C_COMPILER}"
+            "$<TARGET_FILE:morok_plugin>"
+            "${_sysroot}"
+            "${_adversarial_workload}"
+            "${_adversarial_config}"
+            "selfcheck-code-far"
+            4242)
+  set_tests_properties("e2e/adversarial_selfcheck_far_code_patch" PROPERTIES
+    LABELS "e2e;adversarial;max"
+    REQUIRED_FILES
+      "$<TARGET_FILE:morok_plugin>;${_adversarial_driver};${_adversarial_config};${_adversarial_workload}"
+    TIMEOUT 120)
+
   add_test(NAME "e2e/adversarial_mutualguard_code_patch"
     COMMAND bash "${_adversarial_driver}"
             "${Python3_EXECUTABLE}"

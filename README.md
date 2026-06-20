@@ -322,10 +322,12 @@ Post-link sealing is mandatory for shippable binaries that rely on
 `self_checksum_constants`, `mutual_guard_graph`, or `caller_keyed_dispatch`
 native-code windows. The IR passes reserve retained manifests, but final code
 byte ranges are only known after linking and stripping. `cross_build.sh` seals
-automatically after strip and fails closed if no manifests are present. It then
-runs `tools/morok-audit.py` over the final output directory to reject unsealed
-manifests, placeholder manifest state, private-key sidecars, embedded
-development paths, plaintext high-value release markers, and plaintext
+automatically after strip and fails closed if no manifests are present. The
+post-link sealer uses the requested `--window` as the native-code hash coverage
+limit; the self-check random-data `region_bytes` setting does not cap code
+coverage. It then runs `tools/morok-audit.py` over the final output directory to
+reject unsealed manifests, placeholder manifest state, private-key sidecars,
+embedded development paths, plaintext high-value release markers, and plaintext
 magic/sentinel markers before anything is shipped. Manual sealing is:
 
 ```sh
@@ -871,6 +873,10 @@ When touching post-link integrity, verify both halves:
 ./run_tests.sh -L adversarial
 python3 tests/e2e/adversarial_binary.py seal path/to/binary --window 262144
 ```
+
+The default seal command must cover the full requested native-code window. Do
+not use `region_bytes` as a code-window cap; it sizes only the synthetic
+self-check data region.
 
 ## Troubleshooting
 

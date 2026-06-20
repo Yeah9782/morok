@@ -144,6 +144,10 @@ case "$PATCH_MODE" in
     "$PYTHON" "$TOOL" patch-selfcheck-code "$PATCHED"
     patch_rc="$?"
     ;;
+  selfcheck-code-far)
+    "$PYTHON" "$TOOL" patch-selfcheck-code-far "$PATCHED"
+    patch_rc="$?"
+    ;;
   mutualguard-code)
     "$PYTHON" "$TOOL" patch-mutualguard-code "$PATCHED"
     patch_rc="$?"
