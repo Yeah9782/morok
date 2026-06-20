@@ -3368,17 +3368,15 @@ Function *linuxGotTargetInNeeded(Module &M) {
     auto *ptr = PointerType::getUnqual(ctx);
 
     auto *fn = Function::Create(
-        FunctionType::get(i32, {ptr, ptr, ip, ip}, false),
+        FunctionType::get(ptr, {ptr, ip, ip}, false),
         GlobalValue::PrivateLinkage, "morok.antihook.got.needed", &M);
     fn->addFnAttr(Attribute::NoInline);
     fn->setDSOLocal(true);
     auto *name = fn->getArg(0);
     name->setName("name");
-    auto *target = fn->getArg(1);
-    target->setName("target");
-    auto *dynamic = fn->getArg(2);
+    auto *dynamic = fn->getArg(1);
     dynamic->setName("dynamic");
-    auto *strTab = fn->getArg(3);
+    auto *strTab = fn->getArg(2);
     strTab->setName("strtab");
 
     auto *entry = BasicBlock::Create(ctx, "entry", fn);
@@ -3387,7 +3385,7 @@ Function *linuxGotTargetInNeeded(Module &M) {
     auto *resolveBB = BasicBlock::Create(ctx, "needed.resolve", fn);
     auto *symBB = BasicBlock::Create(ctx, "needed.sym", fn);
     auto *nextBB = BasicBlock::Create(ctx, "needed.next", fn);
-    auto *ret1BB = BasicBlock::Create(ctx, "ret1", fn);
+    auto *retSymBB = BasicBlock::Create(ctx, "needed.ret", fn);
     auto *ret0BB = BasicBlock::Create(ctx, "ret0", fn);
 
     FunctionCallee dlopen = M.getOrInsertFunction(
@@ -3398,10 +3396,8 @@ Function *linuxGotTargetInNeeded(Module &M) {
     IRBuilder<> EB(entry);
     Value *valid = EB.CreateAnd(
         EB.CreateICmpNE(name, ConstantPointerNull::get(ptr)),
-        EB.CreateAnd(
-            EB.CreateICmpNE(target, ConstantPointerNull::get(ptr)),
-            EB.CreateAnd(EB.CreateICmpNE(dynamic, ConstantInt::get(ip, 0)),
-                         EB.CreateICmpNE(strTab, ConstantInt::get(ip, 0)))),
+        EB.CreateAnd(EB.CreateICmpNE(dynamic, ConstantInt::get(ip, 0)),
+                     EB.CreateICmpNE(strTab, ConstantInt::get(ip, 0))),
         "morok.antihook.got.needed.valid");
     EB.CreateCondBr(valid, loopBB, ret0BB);
 
@@ -3434,10 +3430,9 @@ Function *linuxGotTargetInNeeded(Module &M) {
     IRBuilder<> SB(symBB);
     Value *expected =
         SB.CreateCall(dlsym, {handle, name}, "morok.antihook.got.needed.sym");
-    Value *matches = SB.CreateAnd(
-        SB.CreateICmpNE(expected, ConstantPointerNull::get(ptr)),
-        SB.CreateICmpEQ(expected, target), "morok.antihook.got.needed.match");
-    SB.CreateCondBr(matches, ret1BB, nextBB);
+    Value *matches = SB.CreateICmpNE(expected, ConstantPointerNull::get(ptr),
+                                     "morok.antihook.got.needed.match");
+    SB.CreateCondBr(matches, retSymBB, nextBB);
 
     IRBuilder<> NB(nextBB);
     Value *next = NB.CreateAdd(idx, ConstantInt::get(ip, 1),
@@ -3445,11 +3440,11 @@ Function *linuxGotTargetInNeeded(Module &M) {
     NB.CreateBr(loopBB);
     idx->addIncoming(next, nextBB);
 
-    IRBuilder<> R1(ret1BB);
-    R1.CreateRet(ConstantInt::get(i32, 1));
+    IRBuilder<> R1(retSymBB);
+    R1.CreateRet(expected);
 
     IRBuilder<> R0(ret0BB);
-    R0.CreateRet(ConstantInt::get(i32, 0));
+    R0.CreateRet(ConstantPointerNull::get(ptr));
     return fn;
 }
 
@@ -3486,6 +3481,8 @@ Function *linuxGotPltProbe(Module &M, const Triple &TT) {
     auto *relPrepBB = BasicBlock::Create(ctx, "rel.prep", fn);
     auto *relLoopBB = BasicBlock::Create(ctx, "rel.loop", fn);
     auto *relBodyBB = BasicBlock::Create(ctx, "rel.body", fn);
+    auto *relLazyBindBB = BasicBlock::Create(ctx, "rel.lazy.bind", fn);
+    auto *relValidateBB = BasicBlock::Create(ctx, "rel.validate", fn);
     auto *protectBB = BasicBlock::Create(ctx, "rel.protect", fn);
     auto *relNextBB = BasicBlock::Create(ctx, "rel.next", fn);
     auto *retBB = BasicBlock::Create(ctx, "ret", fn);
@@ -3749,36 +3746,27 @@ Function *linuxGotPltProbe(Module &M, const Triple &TT) {
     Value *rxOk = RBB.CreateCall(
         rxCheck, {targetAddr, atPhdr, phNum, phEnt, base, debugPtr},
         "morok.antihook.got.rx");
-    Value *expected = RBB.CreateCall(
-        neededCheck, {namePtr, targetPtr, dynAddr, strTab},
-        "morok.antihook.got.expected");
-    Value *expectedOk =
-        RBB.CreateICmpNE(expected, ConstantInt::get(Type::getInt32Ty(ctx), 0),
-                         "morok.antihook.got.expected.ok");
+    Value *expectedPtr = RBB.CreateCall(
+        neededCheck, {namePtr, dynAddr, strTab}, "morok.antihook.got.expected");
+    Value *hasExpected =
+        RBB.CreateICmpNE(expectedPtr, ConstantPointerNull::get(ptr),
+                         "morok.antihook.got.expected.present");
+    Value *expectedOk = RBB.CreateAnd(
+        hasExpected,
+        RBB.CreateICmpEQ(expectedPtr, targetPtr,
+                         "morok.antihook.got.expected.eq"),
+        "morok.antihook.got.expected.ok");
     Value *externalSym =
         RBB.CreateICmpEQ(symShndx, ConstantInt::get(Type::getInt16Ty(ctx), 0),
                          "morok.antihook.got.sym.external");
     Value *lazy = RBB.CreateCall(
         lazyCheck, {targetAddr, slotAddr, atPhdr, phNum, phEnt, base},
         "morok.antihook.got.lazy");
-    Value *lazyOk = RBB.CreateAnd(
+    Value *lazyShape = RBB.CreateAnd(
         RBB.CreateAnd(RBB.CreateNot(hasNow, "morok.antihook.got.lazy.notnow"),
                       externalSym),
         RBB.CreateICmpNE(lazy, ConstantInt::get(Type::getInt32Ty(ctx), 0)),
-        "morok.antihook.got.lazy.ok");
-    Value *localRxOk = RBB.CreateAnd(
-        RBB.CreateNot(externalSym, "morok.antihook.got.sym.local"),
-        RBB.CreateICmpNE(rxOk, ConstantInt::get(Type::getInt32Ty(ctx), 0)),
-        "morok.antihook.got.local.rx");
-    Value *targetOk = RBB.CreateOr(
-        expectedOk, RBB.CreateOr(localRxOk, lazyOk,
-                                 "morok.antihook.got.local.or.lazy"),
-        "morok.antihook.got.target.ok");
-    incrementDiff(
-        RBB, diff,
-        RBB.CreateNot(targetOk, "morok.antihook.got.violation.pred"),
-        "morok.antihook.got.violation");
-
+        "morok.antihook.got.lazy.shape");
     Value *relroV =
         RBB.CreateLoad(ip, relroVaddrSlot, "morok.antihook.got.relro.v");
     Value *relroSize =
@@ -3787,15 +3775,54 @@ Function *linuxGotPltProbe(Module &M, const Triple &TT) {
         RBB.CreateAdd(base, relroV, "morok.antihook.got.relro.start");
     Value *relroEnd =
         RBB.CreateAdd(relroStart, relroSize, "morok.antihook.got.relro.end");
-    Value *slotInRelro = RBB.CreateAnd(
-        RBB.CreateAnd(hasNow,
-                      RBB.CreateICmpNE(relroV, ConstantInt::get(ip, 0))),
+    Value *slotInAnyRelro = RBB.CreateAnd(
+        RBB.CreateICmpNE(relroV, ConstantInt::get(ip, 0)),
         RBB.CreateAnd(RBB.CreateICmpUGE(slotAddr, relroStart),
                       RBB.CreateICmpULT(slotAddr, relroEnd)),
+        "morok.antihook.got.relro.slot");
+    Value *lazyWritable = RBB.CreateNot(slotInAnyRelro,
+                                        "morok.antihook.got.lazy.writable");
+    Value *lazyOk = RBB.CreateAnd(
+        RBB.CreateAnd(lazyShape, hasExpected,
+                      "morok.antihook.got.lazy.expected"),
+        lazyWritable, "morok.antihook.got.lazy.ok");
+    Value *localRxOk = RBB.CreateAnd(
+        RBB.CreateNot(externalSym, "morok.antihook.got.sym.local"),
+        RBB.CreateICmpNE(rxOk, ConstantInt::get(Type::getInt32Ty(ctx), 0)),
+        "morok.antihook.got.local.rx");
+    Value *targetOk = RBB.CreateOr(
+        expectedOk, RBB.CreateOr(localRxOk, lazyOk,
+                                 "morok.antihook.got.local.or.lazy"),
+        "morok.antihook.got.target.ok");
+    RBB.CreateCondBr(lazyOk, relLazyBindBB, relValidateBB);
+
+    IRBuilder<> LBB(relLazyBindBB);
+    auto *BindStore = LBB.CreateStore(expectedPtr, slotPtr);
+    BindStore->setVolatile(true);
+    BindStore->setAlignment(Align(8));
+    auto *BoundPtr =
+        LBB.CreateLoad(ptr, slotPtr, "morok.antihook.got.lazy.bound");
+    BoundPtr->setVolatile(true);
+    BoundPtr->setAlignment(Align(8));
+    incrementDiff(
+        LBB, diff,
+        LBB.CreateICmpNE(BoundPtr, expectedPtr,
+                         "morok.antihook.got.lazy.bind.fail"),
+        "morok.antihook.got.lazy.bind");
+    LBB.CreateBr(relValidateBB);
+
+    IRBuilder<> RVB(relValidateBB);
+    incrementDiff(
+        RVB, diff,
+        RVB.CreateNot(targetOk, "morok.antihook.got.violation.pred"),
+        "morok.antihook.got.violation");
+
+    Value *slotInRelro = RVB.CreateAnd(
+        hasNow, slotInAnyRelro,
         "morok.antihook.got.protect");
     Value *protectOk =
-        RBB.CreateAnd(slotInRelro, targetOk, "morok.antihook.got.protect.ok");
-    RBB.CreateCondBr(protectOk, protectBB, relNextBB);
+        RVB.CreateAnd(slotInRelro, targetOk, "morok.antihook.got.protect.ok");
+    RVB.CreateCondBr(protectOk, protectBB, relNextBB);
 
     IRBuilder<> PRB(protectBB);
     Value *pageMask =

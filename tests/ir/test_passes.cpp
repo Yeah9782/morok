@@ -14206,12 +14206,25 @@ entry:
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.sym.external") >=
           1u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.expected") >= 1u);
+    CHECK(countNamedInstructions(*Got, "morok.antihook.got.expected.present") >=
+          1u);
+    CHECK(countNamedInstructions(*Got, "morok.antihook.got.expected.eq") >= 1u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.lazy") >= 1u);
+    CHECK(countNamedInstructions(*Got, "morok.antihook.got.lazy.shape") >= 1u);
+    CHECK(countNamedInstructions(*Got, "morok.antihook.got.lazy.expected") >=
+          1u);
+    CHECK(countNamedInstructions(*Got, "morok.antihook.got.lazy.writable") >=
+          1u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.lazy.ok") >= 1u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.lazy.notnow") >=
           1u);
+    CHECK(countNamedInstructions(*Got, "morok.antihook.got.lazy.bound") >= 1u);
+    CHECK(countNamedInstructions(*Got, "morok.antihook.got.lazy.bind.fail") >=
+          1u);
+    CHECK(countNamedInstructions(*Got, "morok.antihook.got.lazy.bind") >= 1u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.target.ok") >= 1u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.local.rx") >= 1u);
+    CHECK(countNamedInstructions(*Got, "morok.antihook.got.relro.slot") >= 1u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.protect.ok") >= 1u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.mprotect") >= 1u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.rx") >= 1u);
