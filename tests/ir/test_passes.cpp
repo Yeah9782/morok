@@ -8958,24 +8958,38 @@ entry:
     CHECK(countNamedInstructions(*Finish, "morok.proof.finish.seal.next") ==
           1u);
 
-    // Regression for #95: an AUTHORIZED run (proof seen) must contribute a ZERO
-    // word so the external_proof seal stays at its S0 baseline and the seal's
-    // consumers (VM keystream / self-checksum diff, encoded against the clean
-    // zero-delta state) decode correctly; only a MISSING proof poisons the seal.
+    // Regression for reopened #95: seeing any non-empty proof is not enough to
+    // keep the seal clean. The seen path must be digest-bound and becomes zero
+    // only when the runtime accumulator equals the build-time expected digest;
+    // missing or forged proof material still poisons the external_proof channel.
     bool missingProofPoisonsSeal = false;
-    bool validProofKeepsSealClean = false;
+    bool seenProofIsDigestBound = false;
+    bool seenProofUsesExpectedDigest = false;
+    bool seenProofIsNotPresenceOnlyClean = false;
     for (Instruction &I : instructions(*Finish)) {
         auto *SI = dyn_cast<SelectInst>(&I);
         if (!SI || SI->getName() != "morok.proof.finish.contribution")
             continue;
-        auto *SeenContribution = dyn_cast<ConstantInt>(SI->getTrueValue());
-        validProofKeepsSealClean = SeenContribution && SeenContribution->isZero();
+        auto *SeenDiff = dyn_cast<BinaryOperator>(SI->getTrueValue());
+        if (SeenDiff && SeenDiff->getOpcode() == Instruction::Xor &&
+            SeenDiff->getName() == "morok.proof.finish.expected.diff") {
+            seenProofIsDigestBound = true;
+            for (Use &Operand : SeenDiff->operands())
+                if (auto *CI = dyn_cast<ConstantInt>(Operand.get()))
+                    seenProofUsesExpectedDigest |= !CI->isZero();
+        }
+        if (auto *SeenContribution = dyn_cast<ConstantInt>(SI->getTrueValue()))
+            seenProofIsNotPresenceOnlyClean = !SeenContribution->isZero();
+        else
+            seenProofIsNotPresenceOnlyClean = true;
         if (auto *CI = dyn_cast<ConstantInt>(SI->getFalseValue()))
             missingProofPoisonsSeal |= !CI->isZero();
         else
             missingProofPoisonsSeal = true;
     }
-    CHECK(validProofKeepsSealClean);
+    CHECK(seenProofIsDigestBound);
+    CHECK(seenProofUsesExpectedDigest);
+    CHECK(seenProofIsNotPresenceOnlyClean);
     CHECK(missingProofPoisonsSeal);
 
     bool finishStoresSeal = false;

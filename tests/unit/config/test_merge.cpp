@@ -157,6 +157,13 @@ TEST_CASE("merge handles every pass family") {
     src.fault_paged_payload.fallback = true;
     src.fault_paged_payload.bind_to_runtime_seal = true;
     src.fault_paged_payload.virtualize_helpers = false;
+    src.external_secret_binding.enabled = true;
+    src.external_secret_binding.mode = "feed_api";
+    src.external_secret_binding.public_key = "pub-rot-a";
+    src.external_secret_binding.expected_digest = "0x1122334455667788";
+    src.external_secret_binding.identity_policy = "raw";
+    src.external_secret_binding.bind_to_runtime_seal = true;
+    src.external_secret_binding.virtualize_helpers = false;
     src.self_checksum.enabled = true;
     src.self_checksum.probability = 82u;
     src.self_checksum.max_constants = 7u;
@@ -352,6 +359,13 @@ TEST_CASE("merge handles every pass family") {
     CHECK(dst.fault_paged_payload.fallback == true);
     CHECK(dst.fault_paged_payload.bind_to_runtime_seal == true);
     CHECK(dst.fault_paged_payload.virtualize_helpers == false);
+    CHECK(dst.external_secret_binding.enabled == true);
+    CHECK(dst.external_secret_binding.mode == "feed_api");
+    CHECK(dst.external_secret_binding.public_key == "pub-rot-a");
+    CHECK(dst.external_secret_binding.expected_digest == "0x1122334455667788");
+    CHECK(dst.external_secret_binding.identity_policy == "raw");
+    CHECK(dst.external_secret_binding.bind_to_runtime_seal == true);
+    CHECK(dst.external_secret_binding.virtualize_helpers == false);
     CHECK(dst.self_checksum.enabled == true);
     CHECK(dst.self_checksum.probability == 82u);
     CHECK(dst.self_checksum.max_constants == 7u);

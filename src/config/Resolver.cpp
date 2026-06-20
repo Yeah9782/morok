@@ -200,6 +200,8 @@ void merge(PassConfig &dst, const PassConfig &src) {
              src.external_secret_binding.mode);
     mergeOpt(dst.external_secret_binding.public_key,
              src.external_secret_binding.public_key);
+    mergeOpt(dst.external_secret_binding.expected_digest,
+             src.external_secret_binding.expected_digest);
     mergeOpt(dst.external_secret_binding.identity_policy,
              src.external_secret_binding.identity_policy);
     mergeOpt(dst.external_secret_binding.bind_to_runtime_seal,

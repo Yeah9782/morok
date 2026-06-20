@@ -610,12 +610,17 @@ does not require a plaintext sentinel to survive in `.rodata`.
 | Virtualization | `morok-vm` | `virtualization` | Lifts eligible integer/pointer computation kernels to encrypted threaded bytecode VMs, including multi-block, memory, cast, compare, division, selected intrinsics, and direct internal helper calls when safe. |
 | Fault-paged payload delivery | `morok-fpp` | `fault_paged_payload` | Encrypts VM bytecode per page and replaces direct bytecode loads with a lazy accessor that decrypts one page-local cache at a time, re-clears page state on switches, and binds anomalous access to the `fault_paged_payload` runtime seal channel. |
 | Hash-gated self-decrypt | `morok-selfdecrypt` | `hash_gated_self_decrypt` | Lazily decrypts VM bytecode from runtime hashes/context and re-encrypts on helper exit. |
-| External proof binding | `morok-proofbind` | `external_secret_binding` | Materializes a proof feed/finish API and folds proof-derived material into the `external_proof` runtime seal channel instead of returning a branchable verdict. |
+| External proof binding | `morok-proofbind` | `external_secret_binding` | Materializes a proof feed/finish API and folds the proof digest difference into the `external_proof` runtime seal channel, so only the expected proof keeps the clean key state. |
 | Tracer attestation | `morok-tracer` | `tracer_attestation` | Uses a Linux/x86_64 buddy tracer to inject runtime-only share words into the parent and folds only delivery mismatch deltas into the `tracer` and anti-debug runtime seal channels. |
 | Self-checksum constants | `morok-selfcheck` | `self_checksum_constants` | Fuses constants with runtime checksum diffs so tamper corrupts data instead of branching. |
 | Mutual guard graph | `morok-mutualguard` | `mutual_guard_graph` | Emits overlapping checksum nodes whose aggregate diff poisons scalar returns. |
 | Data-flow integrity | `morok-dfi` | `data_flow_integrity` | Decodes narrow op tables from runtime integrity hashes and decoy hidden state. |
 | Execution-trace keying | `morok-tracekey` | `execution_trace_keying` | Carries a rolling trace accumulator and delayed tamper samples through data/control state. |
+
+For `external_secret_binding`, `expected_digest` is the expected 64-bit final
+proof accumulator accepted by `morok.proof.finish`. If it is omitted or invalid,
+the pass uses a per-build random expected value so arbitrary proof presence fails
+closed instead of keeping the clean seal state.
 
 VM dispatch is total over all 256 decoded handler IDs. Invalid decoded opcodes,
 registers, pointer-table indexes, branch targets, and unsafe div/rem operands
@@ -747,7 +752,7 @@ shares where needed.
 | `virtualization` | `enabled`, `probability`, `max_functions`, `max_instructions`, `max_registers` |
 | `fault_paged_payload` | `enabled`, `probability`, `max_payloads`, `max_payload_bytes`, `page_size`, `delivery`, `backend`, `per_page_keys`, `reseal_after_use`, `decoy_pages`, `fallback`, `bind_to_runtime_seal`, `virtualize_helpers` |
 | `hash_gated_self_decrypt` | `enabled`, `probability`, `max_payloads`, `max_payload_bytes`, `context_keying` |
-| `external_secret_binding` | `enabled`, `mode`, `public_key`, `identity_policy`, `bind_to_runtime_seal`, `virtualize_helpers` |
+| `external_secret_binding` | `enabled`, `mode`, `public_key`, `expected_digest`, `identity_policy`, `bind_to_runtime_seal`, `virtualize_helpers` |
 | `tracer_attestation` | `enabled`, `mode`, `shares`, `renewal`, `bind_to_runtime_seal`, `virtualize_helpers` |
 | `sealed_blob` | `enabled`, `max_blobs`, `max_blob_bytes`, `key_sources`, `delivery`, `zeroize_after_use`, `runtime_keyed_magic`, `magic_bytes` |
 | `self_checksum_constants` | `enabled`, `probability`, `max_constants`, `region_bytes` |

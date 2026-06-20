@@ -196,6 +196,7 @@ struct ExternalSecretBindingConfig {
     Opt<bool> enabled;
     Opt<std::string> mode;
     Opt<std::string> public_key;
+    Opt<std::string> expected_digest;
     Opt<std::string> identity_policy;
     Opt<bool> bind_to_runtime_seal;
     Opt<bool> virtualize_helpers;

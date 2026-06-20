@@ -278,6 +278,14 @@ TEST_CASE("preset is the base and [passes.*] overrides it") {
     fallback = true
     bind_to_runtime_seal = true
     virtualize_helpers = false
+    [passes.external_secret_binding]
+    enabled = true
+    mode = "feed_api"
+    public_key = "pub-rot-a"
+    expected_digest = "0x1122334455667788"
+    identity_policy = "raw"
+    bind_to_runtime_seal = true
+    virtualize_helpers = false
     [passes.tracer_attestation]
     enabled = true
     mode = "linux_ptrace"
@@ -515,6 +523,14 @@ TEST_CASE("preset is the base and [passes.*] overrides it") {
     CHECK(r.config.passes.fault_paged_payload.fallback == true);
     CHECK(r.config.passes.fault_paged_payload.bind_to_runtime_seal == true);
     CHECK(r.config.passes.fault_paged_payload.virtualize_helpers == false);
+    CHECK(r.config.passes.external_secret_binding.enabled == true);
+    CHECK(r.config.passes.external_secret_binding.mode == "feed_api");
+    CHECK(r.config.passes.external_secret_binding.public_key == "pub-rot-a");
+    CHECK(r.config.passes.external_secret_binding.expected_digest ==
+          "0x1122334455667788");
+    CHECK(r.config.passes.external_secret_binding.identity_policy == "raw");
+    CHECK(r.config.passes.external_secret_binding.bind_to_runtime_seal == true);
+    CHECK(r.config.passes.external_secret_binding.virtualize_helpers == false);
     CHECK(r.config.passes.tracer_attestation.enabled == true);
     CHECK(r.config.passes.tracer_attestation.mode == "linux_ptrace");
     CHECK(r.config.passes.tracer_attestation.shares == 3u);

@@ -427,6 +427,8 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
         passes::ExternalSecretBindingParams p;
         p.mode =
             config_.passes.external_secret_binding.mode.value_or("feed_api");
+        p.expected_digest =
+            config_.passes.external_secret_binding.expected_digest.value_or("");
         p.identity_policy =
             config_.passes.external_secret_binding.identity_policy.value_or(
                 "ascii_lower_strip_ws");

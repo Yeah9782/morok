@@ -6,6 +6,7 @@
 
 #include "morok/passes/RuntimeSeal.hpp"
 
+#include "llvm/ADT/StringRef.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
@@ -13,6 +14,8 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
+
+#include <optional>
 
 using namespace llvm;
 
@@ -72,6 +75,16 @@ Value *mix64(IRBuilderBase &B, Value *X, std::uint64_t Salt,
                     Name + ".mul1");
     return B.CreateXor(X, B.CreateLShr(X, ConstantInt::get(I64, 31)),
                        Name + ".fold31");
+}
+
+std::optional<std::uint64_t> parseExpectedDigest(StringRef Text) {
+    Text = Text.trim();
+    if (Text.empty())
+        return std::nullopt;
+    std::uint64_t Value = 0;
+    if (Text.getAsInteger(0, Value))
+        return std::nullopt;
+    return Value;
 }
 
 Function *getApiFunction(Module &M, StringRef Name, FunctionType *Ty) {
@@ -159,7 +172,8 @@ bool defineFeed(Module &M, GlobalVariable *Accum, GlobalVariable *Seen,
 }
 
 bool defineFinish(Module &M, GlobalVariable *Accum, GlobalVariable *Seen,
-                  bool BindToRuntimeSeal, bool VirtualizeHelpers) {
+                  std::uint64_t ExpectedDigest, bool BindToRuntimeSeal,
+                  bool VirtualizeHelpers) {
     LLVMContext &Ctx = M.getContext();
     auto *I64 = Type::getInt64Ty(Ctx);
     auto *Ty = FunctionType::get(Type::getVoidTy(Ctx), {I64},
@@ -180,17 +194,14 @@ bool defineFinish(Module &M, GlobalVariable *Accum, GlobalVariable *Seen,
     auto *Acc = B.CreateLoad(I64, Accum, "morok.proof.finish.accum");
     Acc->setVolatile(true);
     Acc->setAlignment(Align(8));
-    // Zero-on-clean (#95): an AUTHORIZED run (a proof was provided, so SeenLoad
-    // is true) must leave the external_proof seal at its S0 baseline, so the
-    // seal-derived consumers — the VM keystream fold and the self-checksum diff,
-    // both encoded at build time against the clean zero-delta state — decode
-    // correctly.  Folding the proof-derived material here (a non-zero word even
-    // for a valid proof) moved the seal off S0 on every authorized run, so a
-    // successful proof submission corrupted VM bytecode keys and checksum
-    // constants — a regression that broke the systemic "seal folds are zero on
-    // clean runs" invariant.  Binding is enforced entirely by the MISSING path:
-    // with no proof the contribution is non-zero, the seal diverges, and every
-    // seal-dependent computation fails closed.
+    // Zero-on-valid (#95): seal consumers are encoded against the clean S0
+    // baseline, so a correct proof must contribute exactly zero.  The seen path
+    // is therefore the accumulated proof digest XOR the build-time expected
+    // digest.  Only the expected proof reaches zero; forged and missing proofs
+    // dirty the external_proof channel and fail closed through seal consumers.
+    Value *SeenDiff =
+        B.CreateXor(Acc, ConstantInt::get(I64, ExpectedDigest),
+                    "morok.proof.finish.expected.diff");
     Value *Missing = B.CreateXor(Acc, Domain,
                                  "morok.proof.finish.missing.domain");
     Missing = B.CreateXor(Missing, ConstantInt::get(I64, 0xD6E8FEB86659FD93ULL),
@@ -199,9 +210,8 @@ bool defineFinish(Module &M, GlobalVariable *Accum, GlobalVariable *Seen,
                     "morok.proof.finish.missing");
     Missing = B.CreateOr(Missing, ConstantInt::get(I64, 1),
                          "morok.proof.finish.missing.nonzero");
-    Value *Contribution =
-        B.CreateSelect(SeenLoad, ConstantInt::get(I64, 0), Missing,
-                       "morok.proof.finish.contribution");
+    Value *Contribution = B.CreateSelect(SeenLoad, SeenDiff, Missing,
+                                         "morok.proof.finish.contribution");
     if (BindToRuntimeSeal)
         runtime_seal::foldWord(B, runtime_seal::kExternalProofChannel,
                                Contribution, 0xC5C9B9F06A4A793DULL,
@@ -220,12 +230,15 @@ bool externalSecretBindingModule(Module &M,
 
     if (Params.bind_to_runtime_seal)
         runtime_seal::getChannel(M, runtime_seal::kExternalProofChannel, Rng);
+    const std::uint64_t ExpectedDigest =
+        parseExpectedDigest(Params.expected_digest).value_or(Rng.next() | 1ULL);
     GlobalVariable *Accum = getAccum(M, Rng);
     GlobalVariable *Seen = getSeen(M);
 
     bool Changed = false;
     Changed |= defineFeed(M, Accum, Seen, Params.virtualize_helpers);
-    Changed |= defineFinish(M, Accum, Seen, Params.bind_to_runtime_seal,
+    Changed |= defineFinish(M, Accum, Seen, ExpectedDigest,
+                            Params.bind_to_runtime_seal,
                             Params.virtualize_helpers);
     return Changed;
 }

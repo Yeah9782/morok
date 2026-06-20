@@ -25,15 +25,17 @@ namespace morok::passes {
 struct ExternalSecretBindingParams {
     bool enabled = true;
     std::string mode = "feed_api";
+    std::string expected_digest;
     std::string identity_policy = "ascii_lower_strip_ws";
     bool bind_to_runtime_seal = true;
     bool virtualize_helpers = true;
 };
 
-/// Materialize the generic proof feed API and bind finished proof material into
-/// the RuntimeSeal external_proof channel.  This is the scheme-agnostic layer;
-/// verifier backends can call the same API without returning a branchable
-/// boolean verdict.
+/// Materialize the generic proof feed API and bind the finished proof digest
+/// into the RuntimeSeal external_proof channel.  A seen proof keeps the channel
+/// clean only when its accumulated digest matches the build-time expected
+/// digest; verifier backends can call the same API without returning a
+/// branchable boolean verdict.
 bool externalSecretBindingModule(llvm::Module &M,
                                  const ExternalSecretBindingParams &params,
                                  morok::ir::IRRandom &rng);

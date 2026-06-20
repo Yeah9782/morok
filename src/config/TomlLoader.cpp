@@ -242,6 +242,7 @@ void parseExternalSecretBinding(const toml::table &t,
     c.enabled = readBool(t["enabled"]);
     c.mode = readString(t["mode"]);
     c.public_key = readString(t["public_key"]);
+    c.expected_digest = readString(t["expected_digest"]);
     c.identity_policy = readString(t["identity_policy"]);
     c.bind_to_runtime_seal = readBool(t["bind_to_runtime_seal"]);
     c.virtualize_helpers = readBool(t["virtualize_helpers"]);
